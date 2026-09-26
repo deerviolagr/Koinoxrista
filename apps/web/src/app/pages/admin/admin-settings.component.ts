@@ -13,7 +13,10 @@ import { BuildingsApiService } from '../../core/api/buildings-api.service';
     @if (loading()) {
       <p class="text-sm text-slate-500">Φόρτωση…</p>
     } @else if (error()) {
-      <div class="card border-red-200 bg-red-50 text-sm text-red-700">{{ error() }}</div>
+      <div class="card border-red-200 bg-red-50 text-sm text-red-700">
+        <p>{{ error() }}</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="load()">Δοκιμή ξανά</button>
+      </div>
     } @else {
       <form [formGroup]="form" (ngSubmit)="save()" class="card max-w-xl flex flex-col gap-4">
         <div>
@@ -73,6 +76,7 @@ export class AdminSettingsPage implements OnInit {
   protected readonly message = signal<string | null>(null);
   protected readonly success = signal(false);
   private buildingId: string | null = null;
+  private marketBound = false;
 
   protected readonly form = this.fb.nonNullable.group({
     market: ['GR' as string],
@@ -82,6 +86,12 @@ export class AdminSettingsPage implements OnInit {
   });
 
   ngOnInit(): void {
+    this.load();
+  }
+
+  protected load(): void {
+    this.loading.set(true);
+    this.error.set(null);
     this.buildingsApi.mine().subscribe({
       next: (building) => {
         this.buildingId = building.id;
@@ -91,14 +101,16 @@ export class AdminSettingsPage implements OnInit {
           pspProvider: (building as unknown as { pspProvider?: string }).pspProvider ?? 'viva',
           invoiceRegistrationNo: (building as unknown as { invoiceRegistrationNo?: string }).invoiceRegistrationNo ?? '',
         });
-        // Keep currency in sync when market changes (unless user overrides)
-        this.form.controls.market.valueChanges.subscribe((market) => {
-          const profile = this.registry[market as keyof typeof this.registry];
-          if (profile) {
-            this.form.controls.currency.setValue(profile.currency as string);
-            this.form.controls.pspProvider.setValue(profile.pspProvider as string);
-          }
-        });
+        if (!this.marketBound) {
+          this.form.controls.market.valueChanges.subscribe((market) => {
+            const profile = this.registry[market as keyof typeof this.registry];
+            if (profile) {
+              this.form.controls.currency.setValue(profile.currency as string);
+              this.form.controls.pspProvider.setValue(profile.pspProvider as string);
+            }
+          });
+          this.marketBound = true;
+        }
         this.loading.set(false);
       },
       error: (err) => {
@@ -113,13 +125,21 @@ export class AdminSettingsPage implements OnInit {
     this.saving.set(true);
     this.message.set(null);
     const raw = this.form.getRawValue();
-    const dto: Record<string, string> = {
+    const dto: {
+      market: string;
+      currency: string;
+      pspProvider: string;
+      invoiceRegistrationNo: string | null;
+    } = {
       market: raw.market,
       currency: raw.currency,
       pspProvider: raw.pspProvider,
+      invoiceRegistrationNo: null,
     };
-    // Only send invoiceRegistrationNo when touched or non-empty (empty = clear)
-    dto['invoiceRegistrationNo'] = raw.invoiceRegistrationNo?.trim() ?? '';
+    // The API models an omitted/cleared optional registration as null. An
+    // empty string is not a valid DTO value and used to be rejected by the
+    // validation pipe on some API versions.
+    dto['invoiceRegistrationNo'] = raw.invoiceRegistrationNo.trim() || null;
     this.buildingsApi.updateSettings(this.buildingId, dto).subscribe({
       next: () => {
         this.success.set(true);

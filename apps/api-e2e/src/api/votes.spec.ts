@@ -1,5 +1,6 @@
 import axios from 'axios';
 
+import { apiUrl } from '../support/config';
 import {
   prisma,
   seedBuilding,
@@ -18,7 +19,7 @@ async function waitForSseEvent(
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     void axios
-      .get('http://localhost:3000/api/realtime/events', {
+      .get(apiUrl('/realtime/events'), {
         headers: { Cookie: cookieHeader },
         responseType: 'stream',
         timeout: timeoutMs,
@@ -45,13 +46,21 @@ async function waitForSseEvent(
   });
 }
 
+function requireBuilding(
+  value: Awaited<ReturnType<typeof seedBuilding>> | undefined,
+): Awaited<ReturnType<typeof seedBuilding>> {
+  if (!value) throw new Error('Seeded building was not available');
+  return value;
+}
+
 /**
  * Vote lifecycle: admin opens a vote -> resident casts ballots for their
  * units -> admin closes -> tally is immutable.
  */
 describe('votes lifecycle', () => {
-  let building: Awaited<ReturnType<typeof seedBuilding>>;
-  let voteId: string;
+  let building: Awaited<ReturnType<typeof seedBuilding>> | undefined;
+  let voteId: string | undefined;
+  const transientVoteIds: string[] = [];
 
   beforeAll(async () => {
     building = await seedBuilding();
@@ -59,7 +68,7 @@ describe('votes lifecycle', () => {
 
   it('admin creates a vote', async () => {
     const res = await axios.post(
-      `/api/buildings/${building.id}/votes`,
+      `/api/buildings/${requireBuilding(building).id}/votes`,
       {
         topic: `E2E Ψηφοφορία ${uniqueSuffix()}`,
         thresholdType: 'MILLIMES_MAJORITY',
@@ -124,7 +133,7 @@ describe('votes lifecycle', () => {
   it('pushes a live tally over SSE when a ballot is cast', async () => {
     // Fresh vote so the ballot is legal (the shared one is closed above).
     const fresh = await axios.post(
-      `/api/buildings/${building.id}/votes`,
+      `/api/buildings/${requireBuilding(building).id}/votes`,
       {
         topic: `E2E SSE Ψηφοφορία ${uniqueSuffix()}`,
         thresholdType: 'MILLIMES_MAJORITY',
@@ -133,6 +142,7 @@ describe('votes lifecycle', () => {
       { headers: await adminHeaders() },
     );
     const freshVoteId = fresh.data.id as string;
+    transientVoteIds.push(freshVoteId);
 
     // Reuse the cached resident login: no extra throttled login.
     const residentHeadersCached = await residentHeaders();
@@ -155,7 +165,7 @@ describe('votes lifecycle', () => {
     expect((event.tally as { yesCount: number }).yesCount).toBeGreaterThanOrEqual(1);
 
     await prisma.ballot.deleteMany({ where: { voteId: freshVoteId } });
-    await prisma.vote.delete({ where: { id: freshVoteId } });
+    await prisma.vote.deleteMany({ where: { id: freshVoteId } });
   });
 
   it('a non-member cannot access another building vote list', async () => {
@@ -169,8 +179,14 @@ describe('votes lifecycle', () => {
   });
 
   afterAll(async () => {
-    await prisma.ballot.deleteMany({ where: { voteId } });
-    await prisma.vote.delete({ where: { id: voteId } });
+    if (voteId) {
+      await prisma.ballot.deleteMany({ where: { voteId } });
+      await prisma.vote.deleteMany({ where: { id: voteId } });
+    }
+    for (const transientVoteId of transientVoteIds) {
+      await prisma.ballot.deleteMany({ where: { voteId: transientVoteId } });
+      await prisma.vote.deleteMany({ where: { id: transientVoteId } });
+    }
     await closePrisma();
   });
 });

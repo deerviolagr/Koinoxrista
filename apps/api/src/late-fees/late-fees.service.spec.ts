@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
@@ -70,7 +71,7 @@ describe('LateFeesService.run', () => {
 
   afterEach(() => dateNowSpy.mockRestore());
 
-  it('charges unpaid overdue invoices beyond grace with FLAT rates and audits', async () => {
+  it('fails closed when an overdue charge would be cosmetic-only', async () => {
     prisma.lateFeeSetting.findUnique.mockResolvedValue({
       graceDays: 5,
       mode: 'FLAT',
@@ -78,45 +79,20 @@ describe('LateFeesService.run', () => {
       dailyBps: 0,
       capCents: null,
     });
-    // Due 2026-07-01 → 20 overdue days as of NOW → chargeable days = 15.
     prisma.invoice.findMany.mockResolvedValue([
       makeInvoice({ id: 'inv-a', unitId: 'unit-a' }),
-      makeInvoice({ id: 'inv-b', unitId: 'unit-b', paidCents: 10_000 }), // settled
-      makeInvoice({ id: 'inv-c', unitId: 'unit-c', paidCents: 4_000 }), // partial
+      makeInvoice({ id: 'inv-b', unitId: 'unit-b', paidCents: 10_000 }),
+      makeInvoice({ id: 'inv-c', unitId: 'unit-c', paidCents: 4_000 }),
     ]);
-    prisma.lateFeeCharge.create.mockImplementation(({ data }) =>
-      Promise.resolve({ id: `charge-${data.unitId}`, ...data }),
-    );
 
     await expect(
       service.run('building-1', {}, admin),
-    ).resolves.toEqual({ charged: 2, totalCents: 200 * 15 * 2 });
-
-    const createCallForA = prisma.lateFeeCharge.create.mock.calls.find(
-      ([{ data }]) => data.unitId === 'unit-a',
-    );
-    expect(createCallForA).toBeDefined();
-    const createdA = (createCallForA?.[0] ?? { data: {} }) as {
-      data: Record<string, unknown>;
-    };
-    expect(createdA.data).toMatchObject({
-      buildingId: 'building-1',
-      invoiceId: 'inv-a',
-      month: '2026-06',
-      daysLate: 15,
-      amountCents: 3_000,
-    });
-    expect(audit.record).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: 'late-fee.run',
-        entity: 'late_fee_charge',
-        actorId: 'admin-1',
-        metadata: expect.objectContaining({ charged: 2, totalCents: 6_000 }),
-      }),
-    );
+    ).rejects.toThrow(ConflictException);
+    expect(prisma.lateFeeCharge.create).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
   });
 
-  it('is idempotent: a second run creates zero new charges', async () => {
+  it('is a no-op when the only candidate is already recorded', async () => {
     prisma.lateFeeSetting.findUnique.mockResolvedValue({
       graceDays: 5,
       mode: 'FLAT',
@@ -125,31 +101,17 @@ describe('LateFeesService.run', () => {
       capCents: null,
     });
     prisma.invoice.findMany.mockResolvedValue([makeInvoice()]);
-
-    // First sweep charges the unit…
-    prisma.lateFeeCharge.create.mockResolvedValue({
-      id: 'charge-1',
-      buildingId: 'building-1',
-      unitId: 'unit-a',
-      month: '2026-06',
-      daysLate: 15,
-      amountCents: 3_000,
-    });
-    await expect(
-      service.run('building-1', {}, admin),
-    ).resolves.toEqual({ charged: 1, totalCents: 3_000 });
-
-    // …so a second run sees the existing (unitId, month) pair and no-ops.
     prisma.lateFeeCharge.findMany.mockResolvedValue([
       { unitId: 'unit-a', month: '2026-06' },
     ]);
+
     await expect(
       service.run('building-1', {}, admin),
     ).resolves.toEqual({ charged: 0, totalCents: 0 });
-    expect(prisma.lateFeeCharge.create).toHaveBeenCalledTimes(1);
+    expect(prisma.lateFeeCharge.create).not.toHaveBeenCalled();
   });
 
-  it('skips invoices inside the grace window and computes PERCENT accruals', async () => {
+  it('does not create a charge for an invoice inside the grace window', async () => {
     prisma.lateFeeSetting.findUnique.mockResolvedValue({
       graceDays: 5,
       mode: 'PERCENT',
@@ -157,24 +119,17 @@ describe('LateFeesService.run', () => {
       dailyBps: 50,
       capCents: null,
     });
-    // July 2026 invoice: due Aug 1 → negative overdue days.
     prisma.invoice.findMany.mockResolvedValue([
       makeInvoice({ periodYearMonth: '2026-07', unitId: 'unit-in-grace' }),
-      makeInvoice({ unitId: 'unit-percent' }),
     ]);
 
-    await service.run('building-1', {}, admin);
-
-    const created = prisma.lateFeeCharge.create.mock.calls[0][0] as {
-      data: { daysLate: number; amountCents: number };
-    };
-    expect(created.data.daysLate).toBe(15);
-    // round(10000 × 50bps /10000 × 15) = 750
-    expect(created.data.amountCents).toBe(750);
-    expect(prisma.lateFeeCharge.create).toHaveBeenCalledTimes(1);
+    await expect(
+      service.run('building-1', {}, admin),
+    ).resolves.toEqual({ charged: 0, totalCents: 0 });
+    expect(prisma.lateFeeCharge.create).not.toHaveBeenCalled();
   });
 
-  it('applies the cap to a single charge', async () => {
+  it('fails closed for a capped active charge as well', async () => {
     prisma.lateFeeSetting.findUnique.mockResolvedValue({
       graceDays: 5,
       mode: 'FLAT',
@@ -186,7 +141,8 @@ describe('LateFeesService.run', () => {
 
     await expect(
       service.run('building-1', {}, admin),
-    ).resolves.toEqual({ charged: 1, totalCents: 4_000 });
+    ).rejects.toThrow(ConflictException);
+    expect(prisma.lateFeeCharge.create).not.toHaveBeenCalled();
   });
 
   it('scopes the sweep to the requested month and validates its format', async () => {

@@ -18,6 +18,7 @@ const STRATEGY_LABELS: Record<AllocationStrategy, string> = {
   SQUARE_METERS: 'Ανά τετραγωνικά μέτρα',
   SHARE_FRACTION: 'Ανά μερίδιο ιδιοκτησίας',
   HEADCOUNT: 'Ίσα ανά διαμέρισμα (HEADCOUNT)',
+  METERS: 'Με βάση μετρητές',
 };
 
 @Component({
@@ -53,6 +54,14 @@ const STRATEGY_LABELS: Record<AllocationStrategy, string> = {
       </div>
 
       <div class="card overflow-x-auto p-0 lg:col-span-2">
+        @if (loading()) {
+          <div class="p-6 text-sm text-slate-500">Φόρτωση…</div>
+        } @else if (loadError()) {
+          <div class="m-4 border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            <p>Αποτυχία φόρτωσης κατηγοριών.</p>
+            <button type="button" class="btn btn-secondary mt-2" (click)="loadBuilding()">Δοκιμή ξανά</button>
+          </div>
+        } @else {
         <table class="data-table">
           <thead>
             <tr>
@@ -75,6 +84,7 @@ const STRATEGY_LABELS: Record<AllocationStrategy, string> = {
             }
           </tbody>
         </table>
+        }
       </div>
     </div>
   `,
@@ -96,6 +106,8 @@ export class AdminCategoriesPage implements OnInit {
   protected readonly categories = signal<ExpenseCategory[]>([]);
   protected readonly submitted = signal(false);
   protected readonly saving = signal(false);
+  protected readonly loading = signal(true);
+  protected readonly loadError = signal(false);
 
   protected readonly form = this.fb.nonNullable.group({
     name: ['', Validators.required],
@@ -105,9 +117,21 @@ export class AdminCategoriesPage implements OnInit {
   private buildingId: string | null = null;
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    this.loading.set(true);
+    this.loadError.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.reload();
@@ -142,9 +166,20 @@ export class AdminCategoriesPage implements OnInit {
   private reload(): void {
     const buildingId = this.buildingId;
     if (!buildingId) return;
+    this.loading.set(true);
+    this.loadError.set(false);
     this.categoriesApi
       .list(buildingId)
-      .pipe(catchError(() => EMPTY))
-      .subscribe((categories) => this.categories.set(categories));
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
+      .subscribe((categories) => {
+        this.categories.set(categories);
+        this.loading.set(false);
+      });
   }
 }

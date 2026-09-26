@@ -15,8 +15,9 @@ export interface QuorumResult {
  * - SIMPLE_MAJORITY / HEADCOUNT → quorum at half of the building's total
  *   weight (inclusive: present * 2 >= total). For HEADCOUNT the caller passes
  *   unit counts so quorum is a pure headcount.
- * - MILLIMES_MAJORITY → stricter line (present * 2 > total) so the live meter
- *   turns green only when a millimes decision can no longer be blocked.
+ * - MILLIMES_MAJORITY → the same inclusive 50% line as the ballot tally
+ *   (present * 2 >= total), so the live meter and final result never disagree
+ *   at the boundary.
  *
  * A zero-millime building is degenerate and always reports quorum met,
  * matching tallyVote's behaviour for the same edge case.
@@ -24,20 +25,16 @@ export interface QuorumResult {
 export function quorumOf(
   totalMillimes: number,
   presentMillimes: number,
-  thresholdType: VoteThresholdType,
+  _thresholdType: VoteThresholdType,
 ): QuorumResult {
+  void _thresholdType;
   const total = Math.max(0, Math.trunc(totalMillimes));
   const present = Math.min(Math.max(0, Math.trunc(presentMillimes)), total);
 
   const presentPermille =
     total > 0 ? Math.floor((present * 1000) / total) : 0;
 
-  const quorumMet =
-    total === 0
-      ? true
-      : thresholdType === 'MILLIMES_MAJORITY'
-        ? present * 2 > total
-        : present * 2 >= total;
+  const quorumMet = total === 0 ? true : present * 2 >= total;
 
   return { quorumMet, presentPermille };
 }

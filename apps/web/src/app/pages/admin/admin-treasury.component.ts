@@ -21,7 +21,8 @@ import {
   treasuryAccountTypeLabel,
 } from '../../core/api/treasury-api.service';
 import { ToastService } from '../../ui/toast.service';
-import { eurosToCents, formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
+import { eurosToCents } from '../../ui/format';
 
 @Component({
   selector: 'app-admin-treasury',
@@ -204,7 +205,7 @@ import { eurosToCents, formatEuros } from '../../ui/format';
                 </div>
                 <div class="grid grid-cols-2 gap-3">
                   <div>
-                    <label class="label" for="entryAmount">Ποσό (€) *</label>
+                    <label class="label" for="entryAmount">Ποσό ({{ currency() }}) *</label>
                     <input id="entryAmount" type="number" min="0.01" step="0.01" class="input" formControlName="amount" />
                     @if (entrySubmitted() && entryForm.controls.amount.invalid) {
                       <p class="field-error">Δώστε έγκυρο ποσό.</p>
@@ -295,11 +296,13 @@ import { eurosToCents, formatEuros } from '../../ui/format';
 })
 export class AdminTreasuryPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly treasuryApi = inject(TreasuryApiService);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
   protected readonly directionLabel = treasuryDirectionLabel;
   protected readonly methodLabel = treasuryMethodLabel;
   protected readonly typeLabel = treasuryAccountTypeLabel;

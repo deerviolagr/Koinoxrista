@@ -14,7 +14,7 @@ import type {
 import { OpenBankingApiService } from '../../core/api/openbanking-api.service';
 import { BuildingsApiService } from '../../core/api/buildings-api.service';
 import { ToastService } from '../../ui/toast.service';
-import { formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 import { confidenceCls, confidenceLabel } from './admin-bank-import.component';
 
 @Component({
@@ -184,10 +184,12 @@ import { confidenceCls, confidenceLabel } from './admin-bank-import.component';
 export class AdminOpenBankingPage implements OnInit {
   private readonly openBankingApi = inject(OpenBankingApiService);
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
   protected readonly confidenceLabel = confidenceLabel;
   protected readonly confidenceCls = confidenceCls;
 

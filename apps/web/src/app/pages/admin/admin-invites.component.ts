@@ -370,7 +370,12 @@ export class AdminInvitesPage implements OnInit {
     if (!buildingId) return;
     this.unitsApi
       .list(buildingId)
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.toast.error('Η φόρτωση διαμερισμάτων απέτυχε.');
+          return EMPTY;
+        }),
+      )
       .subscribe((units) => this.units.set(units));
   }
 }

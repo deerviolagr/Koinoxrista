@@ -1,5 +1,6 @@
 import axios from 'axios';
 
+import { apiUrl } from '../support/config';
 import {
   prisma,
   seedBuilding,
@@ -10,22 +11,26 @@ import {
   closePrisma,
 } from './helpers';
 
-/**
- * Full money flow against the seeded demo building:
- * admin creates an expense -> runs invoices -> resident starts checkout ->
- * PSP webhook marks the invoice paid.
- */
+function requireBuilding(
+  value: Awaited<ReturnType<typeof seedBuilding>> | undefined,
+): Awaited<ReturnType<typeof seedBuilding>> {
+  if (!value) throw new Error('Seeded building was not available');
+  return value;
+}
+
+/** Full money flow against the seeded demo building. */
 describe('billing lifecycle', () => {
   const period = uniquePeriod();
-  let building: Awaited<ReturnType<typeof seedBuilding>>;
-  let unitId: string;
-  let categoryId: string;
-  let expenseId: string;
-  let invoiceId: string;
+  let building: Awaited<ReturnType<typeof seedBuilding>> | undefined;
+  let unitId: string | undefined;
+  let categoryId: string | undefined;
+  let expenseId: string | undefined;
+  let invoiceId: string | undefined;
 
   beforeAll(async () => {
     building = await seedBuilding();
-    unitId = building.units[0].id; // Α1 — owned by maria@demo.gr (seed)
+    unitId = building.units[0]?.id;
+    if (!unitId) throw new Error('Seeded building has no units');
     const created = await createExpenseAndRun(building.id, period);
     categoryId = created.categoryId;
     expenseId = created.expenseId;
@@ -35,11 +40,12 @@ describe('billing lifecycle', () => {
   });
 
   it('creates one invoice per unit for the period', async () => {
+    const activeBuilding = requireBuilding(building);
     const res = await axios.get(
-      `/api/buildings/${building.id}/invoices?periodYearMonth=${period}`,
+      apiUrl(`/buildings/${activeBuilding.id}/invoices?periodYearMonth=${period}`),
       { headers: await adminHeaders() },
     );
-    expect(res.data.length).toBe(building.units.length);
+    expect(res.data.length).toBe(activeBuilding.units.length);
     const first = res.data[0];
     expect(first.unitId).toBeTruthy();
     expect(first.totalCents).toBeGreaterThan(0);
@@ -47,7 +53,7 @@ describe('billing lifecycle', () => {
 
   it('resident sees the invoice in their balance', async () => {
     const res = await axios.get(
-      `/api/invoices/mine?periodYearMonth=${period}`,
+      apiUrl(`/invoices/mine?periodYearMonth=${period}`),
       { headers: await residentHeaders() },
     );
     const found = res.data.find(
@@ -59,7 +65,7 @@ describe('billing lifecycle', () => {
 
   it('resident starts checkout and the webhook marks the invoice paid', async () => {
     const checkout = await axios.post(
-      `/api/invoices/${invoiceId}/pay`,
+      apiUrl(`/invoices/${invoiceId}/pay`),
       {},
       { headers: await residentHeaders() },
     );
@@ -67,10 +73,10 @@ describe('billing lifecycle', () => {
     expect(orderCode).toBeTruthy();
     expect(checkout.data.order.status).toBe('PENDING');
 
-    const webhook = await axios.post('/api/payments/webhook', { orderCode });
+    const webhook = await axios.post(apiUrl('/payments/webhook'), { orderCode });
     expect(webhook.data.ok).toBe(true);
 
-    const detail = await axios.get(`/api/invoices/${invoiceId}`, {
+    const detail = await axios.get(apiUrl(`/invoices/${invoiceId}`), {
       headers: await residentHeaders(),
     });
     expect(detail.data.status).toBe('PAID');
@@ -81,7 +87,7 @@ describe('billing lifecycle', () => {
   it('blocks paying an already-paid invoice', async () => {
     await expect(
       axios.post(
-        `/api/invoices/${invoiceId}/pay`,
+        apiUrl(`/invoices/${invoiceId}/pay`),
         {},
         { headers: await residentHeaders() },
       ),
@@ -89,14 +95,26 @@ describe('billing lifecycle', () => {
   });
 
   afterAll(async () => {
-    await prisma.payment.deleteMany({ where: { invoiceId } });
-    await prisma.paymentOrder.deleteMany({ where: { invoiceId } });
-    await prisma.invoice.deleteMany({
-      where: { periodYearMonth: period, buildingId: building.id },
-    });
-    await prisma.share.deleteMany({ where: { expenseId } });
-    await prisma.expense.delete({ where: { id: expenseId } });
-    await prisma.expenseCategory.delete({ where: { id: categoryId } });
-    await closePrisma();
+    try {
+      if (invoiceId) {
+        await prisma.payment.deleteMany({ where: { invoiceId } });
+        await prisma.paymentOrder.deleteMany({ where: { invoiceId } });
+        await prisma.invoice.deleteMany({
+          where: {
+            id: invoiceId,
+            ...(building ? { buildingId: building.id } : {}),
+          },
+        });
+      }
+      if (expenseId) {
+        await prisma.share.deleteMany({ where: { expenseId } });
+        await prisma.expense.deleteMany({ where: { id: expenseId } });
+      }
+      if (categoryId) {
+        await prisma.expenseCategory.deleteMany({ where: { id: categoryId } });
+      }
+    } finally {
+      await closePrisma();
+    }
   });
 });

@@ -17,21 +17,112 @@ export interface LlmProvider {
 }
 
 export const LLM_PROVIDER = Symbol('LLM_PROVIDER');
+export const DEFAULT_LLM_TIMEOUT_MS = 15_000;
+const MAX_LLM_TIMEOUT_MS = 120_000;
+
+export function isAiLocalOnly(): boolean {
+  return (process.env.AI_LOCAL_ONLY ?? '').trim().toLowerCase() === 'true';
+}
+
+function configuredTimeoutMs(): number {
+  const raw = Number(
+    process.env.LLM_TIMEOUT_MS ??
+      process.env.AI_REQUEST_TIMEOUT_MS ??
+      process.env.AI_LLM_TIMEOUT_MS ??
+      DEFAULT_LLM_TIMEOUT_MS,
+  );
+  if (!Number.isFinite(raw)) return DEFAULT_LLM_TIMEOUT_MS;
+  return Math.min(MAX_LLM_TIMEOUT_MS, Math.max(1, Math.floor(raw)));
+}
+
+function isPrivateIpv4(hostname: string): boolean {
+  const parts = hostname.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false;
+  }
+  const [a, b] = parts;
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254)
+  );
+}
 
 /**
- * Console/offline provider (Feature 17 default). Renders the context so a
- * developer can see exactly what would be sent to a hosted model. Returns a
- * deterministic Greek placeholder so the UI stays functional without keys.
+ * Strict local-endpoint policy for AI_LOCAL_ONLY.  A configured URL is not
+ * trusted merely because it implements an OpenAI-compatible API: a hostname
+ * such as `https://llm.example.com` would still exfiltrate building context.
+ * Loopback, Docker-style local names, and RFC1918/link-local addresses are
+ * accepted; public DNS names and public IPs are not.
+ */
+export function isLocalLlmUrl(value: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return false;
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    hostname === 'localhost' ||
+    hostname === 'ollama' ||
+    hostname === 'host.docker.internal' ||
+    hostname.endsWith('.local')
+  ) {
+    return true;
+  }
+  if (hostname === '::1' || hostname === '0.0.0.0') return true;
+  return isPrivateIpv4(hostname);
+}
+
+export function assertLocalLlmUrl(value: string): void {
+  if (!isLocalLlmUrl(value)) {
+    throw new Error(
+      'AI_LOCAL_ONLY=true permits only a local OpenAI-compatible endpoint; refusing remote URL',
+    );
+  }
+}
+
+export async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = configuredTimeoutMs(),
+): Promise<Response> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`LLM request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  try {
+    // Promise.race also protects against fetch implementations/test doubles
+    // that fail to observe AbortSignal themselves.
+    return await Promise.race([
+      fetch(url, { ...init, signal: controller.signal }),
+      timeout,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Console/offline provider (Feature 17 default). It deliberately logs only
+ * metadata, never the prompt or retrieved context.
  */
 export class ConsoleLlmProvider implements LlmProvider {
   readonly name = 'console';
   private readonly logger = new Logger(ConsoleLlmProvider.name);
 
   async complete(_system: string, user: string): Promise<string> {
-    this.logger.log(`[assistant][mock] query: ${user}`);
-    // Greek placeholder keeps the UI functional when no local LLM is running.
-    // In production with AI_LOCAL_ONLY=true this is never shown — Ollama (Meltemi)
-    // answers instead. Message mirrors FEATURE_PLAN.md:17 fallback.
+    this.logger.log(`[assistant][mock] query length=${user.length}`);
     return (
       'Η απάντηση δεν είναι διαθέσιμη από το τοπικό μοντέλο αυτή τη στιγμή. ' +
       'Δοκιμάστε ξανά ή συμβουλευτείτε τις Ανακοινώσεις του κτιρίου και τη σελίδα FAQ. ' +
@@ -56,11 +147,14 @@ export class OpenAiLlmProvider implements LlmProvider {
   ) {}
 
   async complete(system: string, user: string): Promise<string> {
+    if (isAiLocalOnly()) {
+      throw new Error('Hosted OpenAI provider is disabled by AI_LOCAL_ONLY');
+    }
     const messages: LlmMessage[] = [
       { role: 'system', content: system },
       { role: 'user', content: user },
     ];
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
+    const res = await fetchWithTimeout(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
@@ -74,8 +168,7 @@ export class OpenAiLlmProvider implements LlmProvider {
       }),
     });
     if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      this.logger.warn(`OpenAI request failed (${res.status}): ${detail}`);
+      this.logger.warn(`OpenAI request failed (${res.status})`);
       throw new Error(`OpenAI request failed (${res.status})`);
     }
     const data = (await res.json()) as {
@@ -105,7 +198,10 @@ export class AnthropicLlmProvider implements LlmProvider {
   ) {}
 
   async complete(system: string, user: string): Promise<string> {
-    const res = await fetch(`${this.baseUrl}/messages`, {
+    if (isAiLocalOnly()) {
+      throw new Error('Hosted Anthropic provider is disabled by AI_LOCAL_ONLY');
+    }
+    const res = await fetchWithTimeout(`${this.baseUrl}/messages`, {
       method: 'POST',
       headers: {
         'x-api-key': this.apiKey,
@@ -121,8 +217,7 @@ export class AnthropicLlmProvider implements LlmProvider {
       }),
     });
     if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      this.logger.warn(`Anthropic request failed (${res.status}): ${detail}`);
+      this.logger.warn(`Anthropic request failed (${res.status})`);
       throw new Error(`Anthropic request failed (${res.status})`);
     }
     const data = (await res.json()) as {
@@ -152,11 +247,17 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     private readonly apiKey: string,
     private readonly model: string,
     private readonly url: string,
-  ) {}
+  ) {
+    if (isAiLocalOnly()) {
+      assertLocalLlmUrl(url);
+    }
+  }
 
   async complete(system: string, user: string): Promise<string> {
-    const res = await fetch(this.url, {
+    if (isAiLocalOnly()) assertLocalLlmUrl(this.url);
+    const res = await fetchWithTimeout(this.url, {
       method: 'POST',
+      redirect: 'error',
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
         'Content-Type': 'application/json',
@@ -190,15 +291,16 @@ export type LlmProviderKind = 'console' | 'openai' | 'anthropic' | 'openai-compa
 /**
  * Selects a provider from configuration. Explicit `LLM_PROVIDER` wins; when set
  * to `auto` (default) we pick the first fully-configured provider. A requested
- * provider whose key is missing logs a loud warning and falls back to console
- * rather than crashing the module at boot.
+ * provider whose key is missing logs a warning and falls back to console
+ * rather than crashing the module at boot. In local-only mode, every hosted
+ * path and every public compatible URL is rejected.
  */
 export function createLlmProvider(): LlmProvider {
   const logger = new Logger('LlmProvider');
   const explicit = (process.env.LLM_PROVIDER ?? 'auto')
     .toLowerCase()
     .trim() as LlmProviderKind | 'auto';
-  const localOnly = (process.env.AI_LOCAL_ONLY ?? '').toLowerCase() === 'true';
+  const localOnly = isAiLocalOnly();
 
   const openaiKey = process.env.OPENAI_API_KEY ?? '';
   const openaiModel = process.env.OPENAI_MODEL ?? 'gpt-4o-mini';
@@ -211,16 +313,24 @@ export function createLlmProvider(): LlmProvider {
   const compatUrl = process.env.LLM_API_URL ?? '';
   const compatKey = process.env.LLM_API_KEY ?? '';
   const compatModel = process.env.LLM_MODEL ?? 'meltemi:7b';
+  const localCompatUrl = compatUrl && (!localOnly || isLocalLlmUrl(compatUrl));
+
+  const compatible = (): LlmProvider =>
+    new OpenAiCompatibleProvider(compatKey, compatModel, compatUrl);
 
   const pick = (): LlmProvider => {
     if (localOnly) {
-      if (compatUrl) return new OpenAiCompatibleProvider(compatKey, compatModel, compatUrl);
-      logger.log('AI_LOCAL_ONLY=true — hosted LLM disabled, using console/local fallback');
+      if (localCompatUrl) return compatible();
+      if (compatUrl) {
+        logger.warn('AI_LOCAL_ONLY=true — refusing remote OpenAI-compatible URL; using console fallback');
+      } else {
+        logger.log('AI_LOCAL_ONLY=true — hosted LLM disabled, using console/local fallback');
+      }
       return new ConsoleLlmProvider();
     }
     if (anthropicKey) return new AnthropicLlmProvider(anthropicKey, anthropicModel);
     if (openaiKey) return new OpenAiLlmProvider(openaiKey, openaiModel, openaiBaseUrl);
-    if (compatUrl) return new OpenAiCompatibleProvider(compatKey, compatModel, compatUrl);
+    if (compatUrl) return compatible();
     return new ConsoleLlmProvider();
   };
 
@@ -230,7 +340,7 @@ export function createLlmProvider(): LlmProvider {
     case 'openai':
       if (localOnly) {
         logger.warn('AI_LOCAL_ONLY=true — hosted openai disabled, using local/console');
-        return compatUrl ? new OpenAiCompatibleProvider(compatKey, compatModel, compatUrl) : new ConsoleLlmProvider();
+        return localCompatUrl ? compatible() : new ConsoleLlmProvider();
       }
       if (openaiKey) return new OpenAiLlmProvider(openaiKey, openaiModel, openaiBaseUrl);
       logger.warn('LLM_PROVIDER=openai but OPENAI_API_KEY is missing; using console mock');
@@ -238,7 +348,7 @@ export function createLlmProvider(): LlmProvider {
     case 'anthropic':
       if (localOnly) {
         logger.warn('AI_LOCAL_ONLY=true — hosted anthropic disabled, using local/console');
-        return compatUrl ? new OpenAiCompatibleProvider(compatKey, compatModel, compatUrl) : new ConsoleLlmProvider();
+        return localCompatUrl ? compatible() : new ConsoleLlmProvider();
       }
       if (anthropicKey) {
         return new AnthropicLlmProvider(anthropicKey, anthropicModel);
@@ -246,7 +356,11 @@ export function createLlmProvider(): LlmProvider {
       logger.warn('LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is missing; using console mock');
       return new ConsoleLlmProvider();
     case 'openai-compatible':
-      if (compatUrl) return new OpenAiCompatibleProvider(compatKey, compatModel, compatUrl);
+      if (localOnly && !localCompatUrl) {
+        logger.warn('AI_LOCAL_ONLY=true — refusing remote compatible URL; using console mock');
+        return new ConsoleLlmProvider();
+      }
+      if (compatUrl) return compatible();
       logger.warn('LLM_PROVIDER=openai-compatible but LLM_API_URL is missing; using console mock');
       return new ConsoleLlmProvider();
     case 'auto':

@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { api } from './api';
+import { api, normalizeApiUrl } from './api';
 
 // Native/Expo modules are not resolvable in a plain Node test environment, so
 // mock them by name. vi.mock factories bypass real module resolution entirely,
@@ -8,6 +8,7 @@ vi.mock('@react-native-async-storage/async-storage', () => ({
   default: {
     getItem: vi.fn(),
     setItem: vi.fn(),
+    removeItem: vi.fn(),
     multiRemove: vi.fn(),
   },
 }));
@@ -69,12 +70,12 @@ describe('mobile api client', () => {
   it('sends login credentials as a JSON POST to /auth/login', async () => {
     storage.getItem.mockResolvedValue(null);
     globalThis.fetch.mockResolvedValue(
-      jsonResponse(200, { token: 'jwt', user: { id: 'u1' } }),
+      jsonResponse(200, { accessToken: 'jwt', user: { id: 'u1' } }),
     );
 
     const res = await api.login({ email: 'a@b.gr', password: 'pw' });
 
-    expect(res).toEqual({ token: 'jwt', user: { id: 'u1' } });
+    expect(res).toEqual({ accessToken: 'jwt', user: { id: 'u1' } });
     const { url, init } = lastRequest(globalThis.fetch);
     expect(url).toBe(`${BASE_URL}/auth/login`);
     expect(init.method).toBe('POST');
@@ -86,7 +87,9 @@ describe('mobile api client', () => {
     storage.getItem.mockResolvedValue(null);
     globalThis.fetch.mockResolvedValue(jsonResponse(200, { items: [1, 2] }));
 
-    await expect(api.announcements()).resolves.toEqual({ items: [1, 2] });
+    await expect(api.announcements('building-1')).resolves.toEqual({
+      items: [1, 2],
+    });
   });
 
   it('throws the server-provided message on an error response', async () => {
@@ -126,5 +129,74 @@ describe('mobile api client', () => {
       expect(e.message).toBe('boom');
       expect(e.status).toBe(500);
     }
+  });
+
+  it('normalizes a host-only configuration to the /api prefix', () => {
+    expect(normalizeApiUrl('http://localhost:3000')).toBe(
+      'http://localhost:3000/api',
+    );
+    expect(normalizeApiUrl('http://localhost:3000/api/')).toBe(
+      'http://localhost:3000/api',
+    );
+    expect(normalizeApiUrl('localhost:3000')).toBe(
+      'http://localhost:3000/api',
+    );
+  });
+
+  it('handles an empty 204 response', async () => {
+    storage.getItem.mockResolvedValue(null);
+    globalThis.fetch.mockResolvedValue(jsonResponse(204, null));
+
+    await expect(api.pushUnsubscribe({ endpoint: 'endpoint' })).resolves.toBeNull();
+    expect(lastRequest(globalThis.fetch).init.method).toBe('DELETE');
+  });
+
+  it('does not call a non-existent global announcements route', async () => {
+    storage.getItem.mockResolvedValue(null);
+    await expect(api.announcements()).resolves.toEqual([]);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('refreshes through the HttpOnly-cookie endpoint', async () => {
+    storage.getItem.mockResolvedValue(null);
+    globalThis.fetch.mockResolvedValue(
+      jsonResponse(200, { accessToken: 'refreshed-token' }),
+    );
+
+    await expect(api.refresh()).resolves.toEqual({ accessToken: 'refreshed-token' });
+    const { url, init } = lastRequest(globalThis.fetch);
+    expect(url).toBe(`${BASE_URL}/auth/refresh`);
+    expect(init.credentials).toBe('include');
+    expect(init.headers.Authorization).toBeUndefined();
+  });
+
+  it('uses the server logout contract', async () => {
+    storage.getItem.mockResolvedValue('jwt-token');
+    globalThis.fetch.mockResolvedValue(jsonResponse(200, { loggedOut: true }));
+
+    await expect(api.logout()).resolves.toEqual({ loggedOut: true });
+    const { url, init } = lastRequest(globalThis.fetch);
+    expect(url).toBe(`${BASE_URL}/auth/logout`);
+    expect(init.method).toBe('POST');
+    expect(init.headers.Authorization).toBe('Bearer jwt-token');
+  });
+
+  it('uses the invoice checkout contract', async () => {
+    storage.getItem.mockResolvedValue(null);
+    globalThis.fetch.mockResolvedValue(
+      jsonResponse(200, {
+        order: { id: 'order-1', checkoutUrl: 'https://pay.example/checkout' },
+        provider: 'mock',
+      }),
+    );
+
+    await expect(api.checkoutInvoice('invoice-1')).resolves.toMatchObject({
+      provider: 'mock',
+    });
+    const { url, init } = lastRequest(globalThis.fetch);
+    expect(url).toBe(`${BASE_URL}/invoices/invoice-1/pay`);
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({});
+    expect(init.credentials).toBe('include');
   });
 });

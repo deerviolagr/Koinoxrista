@@ -1,3 +1,7 @@
+packages:
+  - apps/mobile
+  - libs/shared
+
 allowBuilds:
   '@parcel/watcher': true
   '@prisma/client': true

@@ -11,7 +11,7 @@ import { BuildingsApiService } from '../../core/api/buildings-api.service';
 import { SupplierInvoicesApiService } from '../../core/api/supplier-invoices-api.service';
 import { ExpensesApiService } from '../../core/api/expenses-api.service';
 import { ToastService } from '../../ui/toast.service';
-import { formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 
 type StatusMeta = { label: string; badgeClass: string };
 const STATUS_META: Record<SupplierInvoiceStatus, StatusMeta> = {
@@ -227,15 +227,15 @@ const STATUS_META: Record<SupplierInvoiceStatus, StatusMeta> = {
             </div>
             <div class="grid grid-cols-3 gap-3">
               <div>
-                <label class="label" for="mNet">Καθαρό (€) *</label>
+                <label class="label" for="mNet">Καθαρό ({{ currency() }}) *</label>
                 <input id="mNet" type="number" step="0.01" min="0" class="input" formControlName="netEuros" />
               </div>
               <div>
-                <label class="label" for="mVat">ΦΠΑ (€) *</label>
+                <label class="label" for="mVat">ΦΠΑ ({{ currency() }}) *</label>
                 <input id="mVat" type="number" step="0.01" min="0" class="input" formControlName="vatEuros" />
               </div>
               <div>
-                <label class="label" for="mTotal">Σύνολο (€) *</label>
+                <label class="label" for="mTotal">Σύνολο ({{ currency() }}) *</label>
                 <input id="mTotal" type="number" step="0.01" min="0.01" class="input" formControlName="totalEuros" />
               </div>
             </div>
@@ -303,12 +303,14 @@ const STATUS_META: Record<SupplierInvoiceStatus, StatusMeta> = {
 })
 export class AdminSupplierInvoicesPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly supplierApi = inject(SupplierInvoicesApiService);
   private readonly expensesApi = inject(ExpensesApiService);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
 
   protected readonly invoices = signal<SupplierInvoiceDto[]>([]);
   protected readonly total = signal(0);
@@ -568,7 +570,7 @@ export class AdminSupplierInvoicesPage implements OnInit {
         netCents,
         vatCents,
         totalCents,
-        currency: 'EUR',
+        currency: this.money.currency(),
         ...(raw.classification.trim() ? { classification: raw.classification.trim() } : {}),
       })
       .subscribe({

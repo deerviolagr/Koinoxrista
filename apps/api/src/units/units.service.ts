@@ -11,6 +11,7 @@ import { AuthenticatedUser } from '../auth/auth.types';
 import { TOTAL_MILLIMES } from '@org/shared';
 import { assertSameBuilding } from '../common/tenant';
 import { PrismaService } from '../prisma/prisma.service';
+import { effectiveUserOwnershipWhere } from '../ownerships/ownership-scope';
 import { CreateUnitDto } from './dto/create-unit.dto';
 import { UpdateUnitDto } from './dto/update-unit.dto';
 
@@ -29,6 +30,20 @@ export class UnitsService {
   async listForBuilding(buildingId: string, user: AuthenticatedUser) {
     assertSameBuilding(user, buildingId);
     await this.requireBuilding(buildingId);
+    if (user.role !== 'ADMIN' && user.role !== 'BUILDING_OWNER') {
+      return this.prisma.unit.findMany({
+        where: { buildingId },
+        include: {
+          ownerships: {
+            where: effectiveUserOwnershipWhere(user.id, new Date()),
+            include: {
+              user: { select: { firstName: true, lastName: true, email: true } },
+            },
+          },
+        },
+        orderBy: [{ floor: 'asc' }, { label: 'asc' }],
+      });
+    }
     return this.prisma.unit.findMany({
       where: { buildingId },
       include: UNITS_WITH_OWNERS,
@@ -42,6 +57,12 @@ export class UnitsService {
     user: AuthenticatedUser,
   ) {
     assertSameBuilding(user, buildingId);
+    if (!Number.isSafeInteger(dto.millimes) || dto.millimes <= 0) {
+      throw new BadRequestException('millimes must be a positive integer');
+    }
+    if (dto.label.trim().length === 0) {
+      throw new BadRequestException('label must not be blank');
+    }
     await this.assertMillimesWithinLimit(buildingId, dto.millimes);
 
     return this.prisma.unit.create({
@@ -70,6 +91,12 @@ export class UnitsService {
     }
 
     const nextMillimes = dto.millimes ?? unit.millimes;
+    if (!Number.isSafeInteger(nextMillimes) || nextMillimes <= 0) {
+      throw new BadRequestException('millimes must be a positive integer');
+    }
+    if (dto.label !== undefined && dto.label.trim().length === 0) {
+      throw new BadRequestException('label must not be blank');
+    }
     if (nextMillimes !== unit.millimes) {
       await this.assertMillimesWithinLimit(buildingId, nextMillimes, unitId);
     }

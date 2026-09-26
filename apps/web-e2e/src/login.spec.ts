@@ -3,6 +3,10 @@ import { test, expect, type Page } from '@playwright/test';
 const ADMIN = { email: 'admin@demo.gr', password: 'Admin1234!' };
 const RESIDENT = { email: 'maria@demo.gr', password: 'Password123!' };
 
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('locale', 'el'));
+});
+
 async function login(page: Page, email: string, password: string) {
   await page.goto('/login');
   await page.fill('#email', email);

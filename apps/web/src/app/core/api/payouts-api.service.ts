@@ -12,7 +12,9 @@ import {
 import { environment } from '../../../environments/environment';
 
 /** Greek label for a payout method. */
-export function supplierPaymentMethodLabel(method: SupplierPaymentMethod): string {
+export function supplierPaymentMethodLabel(
+  method: SupplierPaymentMethod,
+): string {
   switch (method) {
     case 'BANK':
       return 'Τράπεζα';
@@ -20,8 +22,11 @@ export function supplierPaymentMethodLabel(method: SupplierPaymentMethod): strin
       return 'Μετρητά';
     case 'CHECK':
       return 'Επιταγή';
-    default:
+    case 'CARD':
       return 'Κάρτα';
+    default:
+      // Never guess that an unknown/new rail is a card payment.
+      return String(method);
   }
 }
 
@@ -30,7 +35,11 @@ export class PayoutsApiService {
   private readonly http = inject(HttpClient);
   private readonly buildingsBase = `${environment.apiUrl}/buildings`;
 
-  list(buildingId: string, year?: string, jobId?: string): Observable<SupplierPaymentDto[]> {
+  list(
+    buildingId: string,
+    year?: string,
+    jobId?: string,
+  ): Observable<SupplierPaymentDto[]> {
     const params: Record<string, string> = {};
     if (year) params['year'] = year;
     if (jobId) params['jobId'] = jobId;
@@ -49,14 +58,20 @@ export class PayoutsApiService {
     );
   }
 
-  create(buildingId: string, dto: CreateSupplierPaymentDto): Observable<SupplierPaymentDto> {
+  create(
+    buildingId: string,
+    dto: CreateSupplierPaymentDto,
+  ): Observable<SupplierPaymentDto> {
     return this.http.post<SupplierPaymentDto>(
       `${this.buildingsBase}/${buildingId}/payouts`,
       dto,
     );
   }
 
-  update(id: string, dto: UpdateSupplierPaymentDto): Observable<SupplierPaymentDto> {
+  update(
+    id: string,
+    dto: UpdateSupplierPaymentDto,
+  ): Observable<SupplierPaymentDto> {
     return this.http.patch<SupplierPaymentDto>(
       `${environment.apiUrl}/payouts/${id}`,
       dto,

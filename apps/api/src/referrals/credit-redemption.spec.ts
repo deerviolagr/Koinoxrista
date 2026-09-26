@@ -90,4 +90,28 @@ describe('redeemReferralCredits', () => {
     ).resolves.toBe(0);
     expect(prisma.referralCredit.updateMany).not.toHaveBeenCalled();
   });
+
+  it('discounts only the credits actually claimed by a concurrent redemption', async () => {
+    const { prisma, audit } = makeDeps();
+    prisma.referralCredit.findMany.mockResolvedValue([row('1'), row('2')]);
+    prisma.referralCredit.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      redeemReferralCredits(prisma, audit, {
+        buildingId: 'b1',
+        period: '2026-10',
+        tier: 'BASIC',
+        units: 4, // €6/month
+        chargeCents: 1200,
+      }),
+    ).resolves.toBe(600);
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          monthsConsumed: 1,
+          discountCents: 600,
+        }),
+      }),
+    );
+  });
 });

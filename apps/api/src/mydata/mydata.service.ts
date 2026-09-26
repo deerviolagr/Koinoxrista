@@ -1,7 +1,14 @@
-import { Inject, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { MyDataStatus, PaymentMethod, PaymentStatus } from '@prisma/client';
 
+import type { CurrencyCode } from '@org/shared';
 import { requireValidPeriod } from '../common/tenant';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -12,16 +19,40 @@ import {
 import { SubmissionError } from './mydata.live';
 import { buildMyDataXml, MyDataXmlRecord } from './mydata.xml';
 
-// Greek VAT 24%; all math stays in integer cents.
-const VAT_RATE = 1.24;
+const GR_MYDATA_CURRENCY: CurrencyCode = 'EUR';
+const VAT_RATE_ENV = 'MYDATA_VAT_RATE_BPS';
+const GREEK_VAT_RATES_BPS = new Set([0, 400, 600, 900, 1300, 1700, 2400]);
 
-/** Splits a gross paid amount into net + VAT without losing a single cent. */
-export function computeNetVat(paidCents: number): {
-  netAmountCents: number;
-  vatAmountCents: number;
-} {
-  const netAmountCents = Math.round(paidCents / VAT_RATE);
-  return { netAmountCents, vatAmountCents: paidCents - netAmountCents };
+/**
+ * Split a gross amount into net and VAT using an explicitly configured rate.
+ * There is intentionally no default rate: an invoice total alone does not
+ * contain enough information to invent a Greek VAT breakdown.
+ */
+export function computeNetVat(
+  paidCents: number,
+  vatRateBps?: number,
+): { netAmountCents: number; vatAmountCents: number } {
+  if (!Number.isSafeInteger(paidCents) || paidCents < 0) {
+    throw new TypeError('paidCents must be a non-negative safe integer');
+  }
+  if (vatRateBps === undefined) {
+    throw new Error(
+      'A VAT rate is required; myDATA never assumes a VAT percentage',
+    );
+  }
+  if (!Number.isSafeInteger(vatRateBps) || vatRateBps < 0 || vatRateBps > 10_000) {
+    throw new RangeError('vatRateBps must be an integer between 0 and 10000');
+  }
+  const netAmountCents = Math.round(
+    (paidCents * 10_000) / (10_000 + vatRateBps),
+  );
+  if (!Number.isSafeInteger(netAmountCents)) {
+    throw new RangeError('VAT result is outside the safe integer range');
+  }
+  return {
+    netAmountCents,
+    vatAmountCents: paidCents - netAmountCents,
+  };
 }
 
 /** Invoice series; configurable later. */
@@ -32,15 +63,18 @@ const INVOICE_TYPE = '2.1';
 const CLASSIFICATION_CATEGORY = 'category1_1';
 const CLASSIFICATION_TYPE = 'E3_561_001';
 // myDATA payment-method codes: '3' = card/POS, '9' = IRIS transfer.
-// Partial by design: GR only ever writes CARD | IRIS; international rails
-// (PIX/ACH/SPEI/SEPA_DD/INTERAC) are not myDATA-classified → default '3'.
+// GR only writes these two explicitly supported rails; no method is guessed.
 const PAYMENT_METHOD_CODES: Partial<Record<PaymentMethod, string>> = {
   [PaymentMethod.CARD]: '3',
   [PaymentMethod.IRIS]: '9',
 };
 
 function myDataPaymentCode(method: PaymentMethod): string {
-  return PAYMENT_METHOD_CODES[method] ?? '3';
+  const code = PAYMENT_METHOD_CODES[method];
+  if (!code) {
+    throw new Error(`Payment method ${method} has no myDATA GR mapping`);
+  }
+  return code;
 }
 
 type Tx = Parameters<Parameters<PrismaService['$transaction']>[0]>[0];
@@ -67,6 +101,33 @@ function isUniqueConflict(error: unknown): boolean {
   );
 }
 
+function configuredVatRateBps(): number {
+  const raw = process.env[VAT_RATE_ENV];
+  if (raw === undefined || raw.trim() === '') {
+    throw new BadRequestException(
+      `${VAT_RATE_ENV} is required; myDATA does not infer VAT from a gross amount`,
+    );
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || !GREEK_VAT_RATES_BPS.has(value)) {
+    throw new BadRequestException(
+      `${VAT_RATE_ENV} must be one of the configured Greek AADE rates: 0, 400, 600, 900, 1300, 1700, 2400`,
+    );
+  }
+  return value;
+}
+
+export function isGreekMyDataBuilding(building: {
+  market?: string | null;
+  currency?: string | null;
+}): boolean {
+  return (
+    (building.market ?? 'GR').toUpperCase() === 'GR' &&
+    (building.currency ?? GR_MYDATA_CURRENCY).toUpperCase() ===
+      GR_MYDATA_CURRENCY
+  );
+}
+
 export interface MyDataFile {
   body: string;
   contentType: string;
@@ -80,11 +141,43 @@ export class MyDataService {
     @Inject(MYDATA_PROVIDER) private readonly provider: MyDataProvider,
   ) {}
 
+  /**
+   * myDATA is an ΑΑΔΕ/Greek adapter, not a generic invoice exporter. Every
+   * public operation checks the building profile before touching invoice data
+   * or a provider.
+   */
+  private async assertGreekBuilding(
+    buildingId: string,
+  ): Promise<{ currency: CurrencyCode }> {
+    const building = await this.prisma.building.findUnique({
+      where: { id: buildingId },
+      select: { market: true, currency: true },
+    });
+    if (!building) {
+      throw new NotFoundException('Building not found');
+    }
+    if ((building.market ?? 'GR').toUpperCase() !== 'GR') {
+      throw new ForbiddenException(
+        'myDATA is available only for Greek buildings (market=GR)',
+      );
+    }
+    if (
+      (building.currency ?? GR_MYDATA_CURRENCY).toUpperCase() !==
+      GR_MYDATA_CURRENCY
+    ) {
+      throw new BadRequestException(
+        'myDATA requires a Greek building with currency EUR',
+      );
+    }
+    return { currency: GR_MYDATA_CURRENCY };
+  }
+
   async generateForPeriod(
     buildingId: string,
     periodYearMonth: string,
   ): Promise<{ created: number; skipped: number }> {
     const period = requireValidPeriod(periodYearMonth);
+    const { currency } = await this.assertGreekBuilding(buildingId);
 
     const paid = await this.prisma.invoice.findMany({
       where: {
@@ -104,6 +197,10 @@ export class MyDataService {
       orderBy: { unitId: 'asc' },
     });
     const pending = paid.filter((invoice) => !invoice.myData);
+    if (pending.length === 0) {
+      return { created: 0, skipped: paid.length };
+    }
+    const vatRateBps = configuredVatRateBps();
 
     let created = 0;
     await this.prisma.$transaction(async (tx) => {
@@ -118,6 +215,8 @@ export class MyDataService {
               buildingId,
               invoice,
               seqNo,
+              currency,
+              vatRateBps,
             );
             if (recorded === MyDataStatus.SUBMITTED) {
               created += 1;
@@ -139,12 +238,20 @@ export class MyDataService {
   }
 
   async listForPeriod(buildingId: string, periodYearMonth: string | undefined) {
+    await this.assertGreekBuilding(buildingId);
+    return this.findForPeriod(buildingId, periodYearMonth);
+  }
+
+  private async findForPeriod(
+    buildingId: string,
+    periodYearMonth: string | undefined,
+  ) {
     const period =
       periodYearMonth !== undefined
         ? requireValidPeriod(periodYearMonth)
         : undefined;
 
-    return this.prisma.myDataInvoice.findMany({
+    const records = await this.prisma.myDataInvoice.findMany({
       where: {
         buildingId,
         ...(period ? { invoice: { periodYearMonth: period } } : {}),
@@ -156,13 +263,18 @@ export class MyDataService {
       },
       orderBy: { seqNo: 'desc' },
     });
+    return records.map((record) => ({
+      ...record,
+      currency: GR_MYDATA_CURRENCY,
+    }));
   }
 
   async xmlForPeriod(
     buildingId: string,
     periodYearMonth: string | undefined,
   ): Promise<MyDataFile> {
-    const records = await this.listForPeriod(buildingId, periodYearMonth);
+    const { currency } = await this.assertGreekBuilding(buildingId);
+    const records = await this.findForPeriod(buildingId, periodYearMonth);
     const xmlRecords = records.map<MyDataXmlRecord>((record) => ({
       mark: record.mark,
       series: record.series,
@@ -173,6 +285,7 @@ export class MyDataService {
       classificationType: record.classificationType,
       netAmountCents: record.netAmountCents,
       vatAmountCents: record.vatAmountCents,
+      currency,
     }));
     const suffix = periodYearMonth
       ? `-${requireValidPeriod(periodYearMonth)}`
@@ -194,6 +307,7 @@ export class MyDataService {
     periodYearMonth: string,
   ): Promise<{ checked: number; accepted: number; rejected: number }> {
     const period = requireValidPeriod(periodYearMonth);
+    await this.assertGreekBuilding(buildingId);
     if (!this.provider.pollStatus) {
       return { checked: 0, accepted: 0, rejected: 0 };
     }
@@ -254,9 +368,17 @@ export class MyDataService {
       payments: { method: PaymentMethod }[];
     },
     seqNo: number,
+    currency: CurrencyCode,
+    vatRateBps: number,
   ): Promise<'SUBMITTED' | 'REJECTED'> {
-    const method = invoice.payments[0]?.method ?? PaymentMethod.CARD;
-    const { netAmountCents, vatAmountCents } = computeNetVat(invoice.paidCents);
+    const method = invoice.payments[0]?.method;
+    if (!method) {
+      throw new Error(`Invoice ${invoice.id} has no payment method for myDATA`);
+    }
+    const { netAmountCents, vatAmountCents } = computeNetVat(
+      invoice.paidCents,
+      vatRateBps,
+    );
     const now = new Date();
     const input = {
       invoiceId: invoice.id,
@@ -264,6 +386,7 @@ export class MyDataService {
       seqNo,
       issueDate: now.toISOString().slice(0, 10),
       invoiceType: INVOICE_TYPE,
+      currency,
       paymentMethodCode: myDataPaymentCode(method),
       netAmountCents,
       vatAmountCents,

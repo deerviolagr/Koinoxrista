@@ -1,5 +1,11 @@
-import { IsEnum, IsOptional, IsString, MinLength } from 'class-validator';
+import {
+  IsIn,
+  IsOptional,
+  IsString,
+  MinLength,
+} from 'class-validator';
 import { AllocationStrategy } from '@prisma/client';
+import { SUPPORTED_ALLOCATION_STRATEGIES } from '../../expenses/allocation-weights';
 
 export class CreateExpenseCategoryDto {
   @IsString()
@@ -7,6 +13,6 @@ export class CreateExpenseCategoryDto {
   name!: string;
 
   @IsOptional()
-  @IsEnum(AllocationStrategy)
+  @IsIn(SUPPORTED_ALLOCATION_STRATEGIES)
   strategy?: AllocationStrategy;
 }

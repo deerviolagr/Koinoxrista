@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { EMPTY, catchError, forkJoin } from 'rxjs';
 import type {
@@ -6,10 +7,11 @@ import type {
   BudgetLineDto,
   ExpenseCategory,
 } from '@org/shared';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 import { BuildingsApiService } from '../../core/api/buildings-api.service';
 import { BudgetsApiService } from '../../core/api/budgets-api.service';
 import { CategoriesApiService } from '../../core/api/categories-api.service';
-import { eurosToCents, formatEuros } from '../../ui/format';
+import { eurosToCents } from '../../ui/format';
 import { ToastService } from '../../ui/toast.service';
 
 @Component({
@@ -48,7 +50,7 @@ import { ToastService } from '../../ui/toast.service';
             }
           </div>
           <div>
-            <label class="label" for="amount">Προβλεπόμενο ποσό (€)</label>
+            <label class="label" for="amount">Προβλεπόμενο ποσό ({{ currency() }})</label>
             <input
               id="amount"
               type="number"
@@ -77,12 +79,17 @@ import { ToastService } from '../../ui/toast.service';
       </div>
 
       <div class="card overflow-x-auto p-0 lg:col-span-2">
-        @if (loadError()) {
+        @if (loading()) {
+          <div class="p-6 text-sm text-slate-500">Φόρτωση…</div>
+        } @else if (loadError()) {
           <div class="border-red-200 bg-red-50 p-4 text-sm text-red-700">
-            Αποτυχία φόρτωσης προϋπολογισμού.
+            <p>Αποτυχία φόρτωσης προϋπολογισμού.</p>
+            <button type="button" class="btn btn-secondary mt-3" (click)="retry()">
+              Δοκιμή ξανά
+            </button>
           </div>
-        }
-        <table class="data-table">
+        } @else {
+          <table class="data-table">
           <thead>
             <tr>
               <th>Όνομα</th>
@@ -115,12 +122,19 @@ import { ToastService } from '../../ui/toast.service';
               </tr>
             }
           </tbody>
-        </table>
+          </table>
+        }
       </div>
     </div>
 
     <div class="card mt-6 overflow-x-auto p-0">
       <h2 class="card-title px-4 pt-4">Προϋπολογισμός έναντι πραγματικών</h2>
+      @if (loadError()) {
+        <div class="m-4 border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          <p>Αποτυχία φόρτωσης σύγκρισης.</p>
+          <button type="button" class="btn btn-secondary mt-2" (click)="retry()">Δοκιμή ξανά</button>
+        </div>
+      } @else {
       <table class="data-table">
         <thead>
           <tr>
@@ -170,6 +184,7 @@ import { ToastService } from '../../ui/toast.service';
           </tfoot>
         }
       </table>
+      }
     </div>
   `,
 })
@@ -177,10 +192,12 @@ export class AdminBudgetsPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
   private readonly budgetsApi = inject(BudgetsApiService);
   private readonly categoriesApi = inject(CategoriesApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
 
   protected readonly currentYear = new Date().getFullYear();
   protected readonly years = Array.from(
@@ -191,7 +208,11 @@ export class AdminBudgetsPage implements OnInit {
   protected readonly yearCtrl = this.fb.nonNullable.control(
     String(this.currentYear),
   );
+  private readonly yearValue = toSignal(this.yearCtrl.valueChanges, {
+    initialValue: this.yearCtrl.value,
+  });
 
+  protected readonly loading = signal(true);
   protected readonly lines = signal<BudgetLineDto[]>([]);
   protected readonly categories = signal<ExpenseCategory[]>([]);
   protected readonly compare = signal<BudgetCompareResponseDto>({
@@ -203,7 +224,7 @@ export class AdminBudgetsPage implements OnInit {
   protected readonly saving = signal(false);
   protected readonly loadError = signal(false);
 
-  protected readonly year = computed(() => Number(this.yearCtrl.value));
+  protected readonly year = computed(() => Number(this.yearValue()));
 
   protected readonly form = this.fb.nonNullable.group({
     name: ['', Validators.required],
@@ -216,16 +237,38 @@ export class AdminBudgetsPage implements OnInit {
   private buildingId: string | null = null;
 
   ngOnInit(): void {
+    this.yearCtrl.valueChanges.subscribe(() => this.reload());
+    this.loadBuilding();
+  }
+
+  protected retry(): void {
+    this.loadBuilding();
+  }
+
+  private loadBuilding(): void {
+    this.loading.set(true);
+    this.loadError.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.categoriesApi
           .list(building.id)
-          .pipe(catchError(() => EMPTY))
+          .pipe(
+            catchError(() => {
+              this.loadError.set(true);
+              this.loading.set(false);
+              return EMPTY;
+            }),
+          )
           .subscribe((categories) => this.categories.set(categories));
-        this.yearCtrl.valueChanges.subscribe(() => this.reload());
         this.reload();
       });
   }
@@ -284,6 +327,7 @@ export class AdminBudgetsPage implements OnInit {
   private reload(): void {
     const buildingId = this.buildingId;
     if (!buildingId) return;
+    this.loading.set(true);
     this.loadError.set(false);
     forkJoin([
       this.budgetsApi.list(buildingId, this.year()),
@@ -292,12 +336,14 @@ export class AdminBudgetsPage implements OnInit {
       .pipe(
         catchError(() => {
           this.loadError.set(true);
+          this.loading.set(false);
           return EMPTY;
         }),
       )
       .subscribe(([lines, compare]) => {
         this.lines.set(lines);
         this.compare.set(compare);
+        this.loading.set(false);
       });
   }
 }

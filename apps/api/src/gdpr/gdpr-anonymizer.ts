@@ -15,7 +15,7 @@ export function anonymizeName(): string {
 }
 
 /** Unusable credential; login as the erased account is impossible.
- * NOTE: revoking already-issued refresh tokens needs a tokenVersion column later.
+ * Refresh sessions are revoked in the erasure transaction by GdprService.
  */
 export function randomPasswordHash(): string {
   return createHash('sha256').update(randomBytes(32)).digest('hex');

@@ -75,8 +75,9 @@ export class ExportsController {
   myStatement(
     @Param('year') year: string,
     @CurrentUser() user: AuthenticatedUser,
+    @Query('unitId') unitId?: string,
   ): Promise<UnitYearStatement> {
-    return this.exportsService.myUnitStatement(year, user);
+    return this.exportsService.myUnitStatement(year, user, unitId);
   }
 
   @Get('invoices/:id/receipt.html')

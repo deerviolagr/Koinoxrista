@@ -4,6 +4,10 @@ import { test, expect } from '@playwright/test';
  * Runs with the admin storageState from the setup project, so each test
  * restores the session via /auth/refresh (no login round-trips).
  */
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('locale', 'el'));
+});
+
 const MODULE_PAGES: Array<{ path: string; heading: string }> = [
   { path: '/admin/maintenance', heading: 'Πρόγραμμα προληπτικής συντήρησης' },
   { path: '/admin/reserve', heading: 'Αποθεματικό' },

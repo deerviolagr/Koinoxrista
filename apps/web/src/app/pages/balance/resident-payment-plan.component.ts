@@ -15,14 +15,17 @@ import {
   paymentPlanStatusCls,
   paymentPlanStatusLabel,
 } from '../../core/api/payment-plans-api.service';
-import { formatEuros } from '../../ui/format';
+import { MoneyPipe } from '../../ui/money.pipe';
 
 /** Timeline state of one installment (pure). */
 export type InstallmentTimelineState = 'paid' | 'overdue' | 'upcoming';
 
-export function installmentState(installment: InstallmentDto): InstallmentTimelineState {
+export function installmentState(
+  installment: InstallmentDto,
+): InstallmentTimelineState {
   if (installment.paidCents >= installment.amountCents) return 'paid';
-  return installment.dueDate.slice(0, 10) < new Date().toISOString().slice(0, 10)
+  return installment.dueDate.slice(0, 10) <
+    new Date().toISOString().slice(0, 10)
     ? 'overdue'
     : 'upcoming';
 }
@@ -41,6 +44,7 @@ export function timelineStateLabel(state: InstallmentTimelineState): string {
 
 @Component({
   selector: 'app-resident-payment-plan',
+  imports: [MoneyPipe],
   changeDetection: ChangeDetectionStrategy.OnPush,
   styles: `
     @media print {
@@ -59,7 +63,11 @@ export function timelineStateLabel(state: InstallmentTimelineState): string {
       <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
         <h1 class="text-xl font-bold text-slate-900">Πρόγραμμα εξόφλησης</h1>
         @if (plan(); as p) {
-          <button type="button" class="btn btn-secondary" (click)="printSheet()">
+          <button
+            type="button"
+            class="btn btn-secondary"
+            (click)="printSheet()"
+          >
             Εκτύπωση
           </button>
         }
@@ -69,15 +77,22 @@ export function timelineStateLabel(state: InstallmentTimelineState): string {
     @if (loading()) {
       <div class="card mx-auto max-w-3xl text-sm text-slate-500">Φόρτωση…</div>
     } @else if (error()) {
-      <div class="card mx-auto max-w-3xl border-red-200 bg-red-50 text-sm text-red-700">
-        Αποτυχία φόρτωσης προγράμματος. Δεν υπάρχει ενεργό πρόγραμμα ή δοκιμάστε ξανά.
+      <div
+        class="card mx-auto max-w-3xl border-red-200 bg-red-50 text-sm text-red-700"
+      >
+        Αποτυχία φόρτωσης προγράμματος. Δεν υπάρχει ενεργό πρόγραμμα ή δοκιμάστε
+        ξανά.
       </div>
     } @else if (plan(); as plan) {
       <div class="mx-auto max-w-3xl">
         <!-- Summary -->
-        <section class="card mb-6 p-8 print:border-0 print:p-0 print:shadow-none">
+        <section
+          class="card mb-6 p-8 print:border-0 print:p-0 print:shadow-none"
+        >
           <header class="mb-4 border-b border-slate-200 pb-4">
-            <h2 class="text-lg font-bold text-slate-900">Τμηματοποίηση οφειλής</h2>
+            <h2 class="text-lg font-bold text-slate-900">
+              Τμηματοποίηση οφειλής
+            </h2>
             <p class="mt-1 text-sm text-slate-600">
               Διαμέρισμα {{ plan.unitLabel || '—' }} ·
               {{ plan.installmentCount }} δόσεις
@@ -87,16 +102,23 @@ export function timelineStateLabel(state: InstallmentTimelineState): string {
           <dl class="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <div>
               <dt class="text-xs text-slate-500">Σύνολο οφειλής</dt>
-              <dd class="mt-1 font-semibold text-slate-900">{{ euros(plan.totalCents) }}</dd>
+              <dd class="mt-1 font-semibold text-slate-900">
+                {{ plan.totalCents | money }}
+              </dd>
             </div>
             <div>
               <dt class="text-xs text-slate-500">Εξοφλημένο</dt>
-              <dd class="mt-1 font-semibold text-green-700">{{ euros(plan.paidCents ?? 0) }}</dd>
+              <dd class="mt-1 font-semibold text-green-700">
+                {{ plan.paidCents ?? 0 | money }}
+              </dd>
             </div>
             <div>
               <dt class="text-xs text-slate-500">Υπόλοιπο</dt>
-              <dd class="mt-1 font-semibold" [class.text-red-700]="planRemaining() > 0">
-                {{ euros(planRemaining()) }}
+              <dd
+                class="mt-1 font-semibold"
+                [class.text-red-700]="planRemaining() > 0"
+              >
+                {{ planRemaining() | money }}
               </dd>
             </div>
             <div>
@@ -115,7 +137,9 @@ export function timelineStateLabel(state: InstallmentTimelineState): string {
               [style.width.%]="progress()"
             ></div>
           </div>
-          <p class="mt-1 text-right text-xs text-slate-500">{{ progress() }}% εξοφλημένο</p>
+          <p class="mt-1 text-right text-xs text-slate-500">
+            {{ progress() }}% εξοφλημένο
+          </p>
         </section>
 
         <!-- Timeline -->
@@ -127,21 +151,29 @@ export function timelineStateLabel(state: InstallmentTimelineState): string {
                 [class]="dotCls(inst)"
               ></span>
               <div class="card !mb-0 p-4">
-                <div class="flex flex-wrap items-baseline justify-between gap-2">
+                <div
+                  class="flex flex-wrap items-baseline justify-between gap-2"
+                >
                   <p class="font-medium text-slate-900">
                     Δόση {{ inst.seq }} από {{ plan.installmentCount }}
                   </p>
                   <p class="text-sm font-semibold" [class]="amountCls(inst)">
-                    {{ euros(inst.amountCents) }}
+                    {{ inst.amountCents | money }}
                   </p>
                 </div>
-                <div class="mt-1 flex flex-wrap items-baseline justify-between gap-2 text-sm">
-                  <p class="text-slate-500">Λήξη: {{ inst.dueDate.slice(0, 10) }}</p>
+                <div
+                  class="mt-1 flex flex-wrap items-baseline justify-between gap-2 text-sm"
+                >
+                  <p class="text-slate-500">
+                    Λήξη: {{ inst.dueDate.slice(0, 10) }}
+                  </p>
                   <p>
-                    @if (inst.paidCents > 0 && inst.paidCents < inst.amountCents) {
+                    @if (
+                      inst.paidCents > 0 && inst.paidCents < inst.amountCents
+                    ) {
                       <span class="text-slate-500">
-                        Εξοφλήθηκε {{ euros(inst.paidCents) }} · απομένουν
-                        {{ euros(inst.amountCents - inst.paidCents) }}
+                        Εξοφλήθηκε {{ inst.paidCents | money }} · απομένουν
+                        {{ inst.amountCents - inst.paidCents | money }}
                       </span>
                     } @else {
                       <span [class]="stateTextCls(inst)">
@@ -171,7 +203,6 @@ export class ResidentPaymentPlanPage implements OnInit, OnDestroy {
   private readonly paymentPlansApi = inject(PaymentPlansApiService);
   private readonly document = inject(DOCUMENT);
 
-  protected readonly euros = formatEuros;
   protected readonly statusLabel = paymentPlanStatusLabel;
   protected readonly statusCls = paymentPlanStatusCls;
 

@@ -280,6 +280,7 @@ describe('AuthController', () => {
         email: 'resident01@demo.gr',
         role: Role.RESIDENT,
         buildingId: 'building-1',
+        status: 'ACTIVE',
       };
       const membershipList = [
         {
@@ -301,6 +302,7 @@ describe('AuthController', () => {
         email: 'resident01@demo.gr',
         role: Role.RESIDENT,
         buildingId: 'building-1',
+        status: 'ACTIVE',
         market: 'GR',
         currency: 'EUR',
         twoFactorEnabled: false,
@@ -315,6 +317,7 @@ describe('AuthController', () => {
         email: 'admin@demo.gr',
         role: Role.ADMIN,
         buildingId: null,
+        status: 'ACTIVE',
       };
       twoFactorService.isEnabled.mockResolvedValue(true);
 
@@ -398,6 +401,7 @@ describe('AuthController', () => {
         phone: null,
         role: Role.ADMIN,
         buildingId: 'building-2',
+        status: 'ACTIVE',
         createdAt: new Date('2026-01-01T00:00:00Z'),
       });
       const res = fakeRes();

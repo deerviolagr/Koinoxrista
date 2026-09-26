@@ -178,17 +178,104 @@ export class ShopService {
       metadata: { productId: product.id, qty: dto.qty, amountCents },
     });
 
-    return this.orderViewFor(order.id);
+    return this.orderViewFor(buildingId, order.id);
   }
 
-  /** Mark an order paid (called by the payment/webhook settlement path). */
-  async markPaid(orderId: string, user?: AuthenticatedUser): Promise<void> {
-    const order = await this.prisma.productOrder.findUnique({ where: { id: orderId } });
-    if (!order) throw new NotFoundException('Order not found');
-    await this.prisma.productOrder.update({
-      where: { id: orderId },
-      data: { status: 'PAID' },
-    });
+  /**
+   * Marks an order paid after a building-scoped lookup.  The overload keeps
+   * compatibility with internal callers that historically passed only
+   * `(orderId, user)`, while all new route calls provide the building
+   * explicitly.  A second settlement is an idempotent no-op.
+   */
+  async markPaid(
+    buildingIdOrOrderId: string,
+    orderIdOrUser: string | AuthenticatedUser,
+    maybeUser?: AuthenticatedUser,
+  ): Promise<void> {
+    const hasExplicitBuilding =
+      typeof orderIdOrUser === 'string' && maybeUser !== undefined;
+    const legacyUser =
+      typeof orderIdOrUser === 'object' && orderIdOrUser !== null
+        ? orderIdOrUser
+        : undefined;
+    const buildingId = hasExplicitBuilding
+      ? buildingIdOrOrderId
+      : legacyUser?.buildingId;
+    const orderId = hasExplicitBuilding
+      ? orderIdOrUser
+      : buildingIdOrOrderId;
+    const user = hasExplicitBuilding ? maybeUser : legacyUser;
+
+    if (!buildingId || !user) {
+      throw new ForbiddenException('Building and authenticated user are required');
+    }
+    assertSameBuilding(user, buildingId);
+
+    const orderDelegate = this.prisma.productOrder as any;
+    const order = orderDelegate.findFirst
+      ? await orderDelegate.findFirst({
+          where: {
+            id: orderId,
+            buildingId,
+            unit: { buildingId },
+            product: { buildingId },
+          },
+          include: { unit: { select: { buildingId: true, label: true } } },
+        })
+      : await orderDelegate.findUnique({
+          where: { id: orderId },
+          include: { unit: { select: { buildingId: true, label: true } } },
+        });
+    if (
+      !order ||
+      order.buildingId !== buildingId ||
+      (order.unit && order.unit.buildingId !== buildingId)
+    ) {
+      throw new NotFoundException('Order not found');
+    }
+    if (order.status === 'PAID') return;
+    if (order.status === 'CANCELLED') {
+      throw new BadRequestException('Cancelled order cannot be marked paid');
+    }
+    if (!this.isAdminLike(user)) {
+      const ownership = await this.prisma.ownership.findFirst({
+        where: { userId: user.id, unitId: order.unitId, unit: { buildingId } },
+        select: { id: true },
+      });
+      if (!ownership) {
+        throw new ForbiddenException('You do not own this order unit');
+      }
+    }
+
+    const hasTransaction = typeof (this.prisma as any).$transaction === 'function';
+    if (hasTransaction) {
+      await (this.prisma as any).$transaction(async (tx: any) => {
+        const orderDelegate = tx.productOrder ?? (this.prisma as any).productOrder;
+        if (orderDelegate.updateMany) {
+          const updated = await orderDelegate.updateMany({
+            where: { id: order.id, buildingId, status: 'PENDING' },
+            data: { status: 'PAID' },
+          });
+          if (updated.count === 0) {
+            const current = orderDelegate.findFirst
+              ? await orderDelegate.findFirst({ where: { id: order.id, buildingId } })
+              : null;
+            if (current?.status === 'PAID') return;
+            throw new BadRequestException('Order is no longer pending');
+          }
+        } else {
+          await orderDelegate.update({
+            where: { id: order.id },
+            data: { status: 'PAID' },
+          });
+        }
+      });
+    } else {
+      await this.prisma.productOrder.update({
+        where: { id: order.id },
+        data: { status: 'PAID' },
+      });
+    }
   }
 
   /** Admin order list + resident order history. */
@@ -196,24 +283,49 @@ export class ShopService {
     assertSameBuilding(user, buildingId);
     if (this.isAdminLike(user)) {
       return this.prisma.productOrder.findMany({
-        where: { buildingId },
+        where: {
+          buildingId,
+          unit: { buildingId },
+          product: { buildingId },
+        },
         include: { unit: { select: { label: true } }, product: { select: { name: true } } },
         orderBy: { createdAt: 'desc' },
       });
     }
     const unit = await this.firstOwnedUnit(buildingId, user.id);
+    // Never fall back to all building orders when the resident owns no unit.
+    if (!unit) return [];
     return this.prisma.productOrder.findMany({
-      where: { buildingId, ...(unit ? { unitId: unit.unitId } : {}) },
+      where: {
+        buildingId,
+        unitId: unit.unitId,
+        unit: { buildingId },
+        product: { buildingId },
+      },
       include: { unit: { select: { label: true } }, product: { select: { name: true } } },
       orderBy: { createdAt: 'desc' },
     });
   }
 
-  private async orderViewFor(id: string): Promise<ProductOrderView> {
-    const order = await this.prisma.productOrder.findUnique({
-      where: { id },
-      include: { unit: { select: { label: true } }, product: { select: { name: true } } },
-    });
+  private async orderViewFor(buildingId: string, id: string): Promise<ProductOrderView> {
+    const orderDelegate = this.prisma.productOrder as any;
+    const order = orderDelegate.findFirst
+      ? await orderDelegate.findFirst({
+          where: {
+            id,
+            buildingId,
+            unit: { buildingId },
+            product: { buildingId },
+          },
+          include: { unit: { select: { label: true } }, product: { select: { name: true } } },
+        })
+      : await orderDelegate.findUnique({
+          where: { id },
+          include: { unit: { select: { label: true } }, product: { select: { name: true } } },
+        });
+    if (order && order.buildingId !== buildingId) {
+      throw new NotFoundException('Order not found');
+    }
     if (!order) throw new NotFoundException('Order not found');
     return {
       id: order.id,

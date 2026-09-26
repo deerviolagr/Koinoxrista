@@ -5,8 +5,8 @@ export default {
   globalTeardown: '<rootDir>/src/support/global-teardown.ts',
   setupFiles: ['<rootDir>/src/support/test-setup.ts'],
   testEnvironment: 'node',
-  // Serialize specs: they share one dev DB and the auth routes are
-  // throttled (10/min), so parallel workers would 429 / collide.
+  // Serialize specs: they share one database fixture and intentionally
+  // exercise the real auth/session throttles.
   maxWorkers: 1,
   testTimeout: 30000,
   transform: {

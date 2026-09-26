@@ -4,6 +4,8 @@ import {
   OpenAiCompatibleProvider,
   OpenAiLlmProvider,
   createLlmProvider,
+  fetchWithTimeout,
+  isLocalLlmUrl,
 } from './llm-provider';
 
 const originalEnv = { ...process.env };
@@ -18,6 +20,7 @@ function stubFetch(resolver: (url: string, init?: RequestInit) => Promise<unknow
 afterEach(() => {
   process.env = { ...originalEnv };
   global.fetch = originalFetch;
+  jest.useRealTimers();
   jest.restoreAllMocks();
   jest.resetModules();
 });
@@ -52,6 +55,21 @@ describe('createLlmProvider', () => {
     process.env.LLM_PROVIDER = 'anthropic';
     process.env.ANTHROPIC_API_KEY = 'ak-test';
     expect(createLlmProvider()).toBeInstanceOf(AnthropicLlmProvider);
+  });
+
+  it('refuses a remote compatible URL when AI_LOCAL_ONLY is enabled', () => {
+    process.env.AI_LOCAL_ONLY = 'true';
+    process.env.LLM_PROVIDER = 'openai-compatible';
+    process.env.LLM_API_URL = 'https://llm.example.com/v1/chat/completions';
+    expect(createLlmProvider()).toBeInstanceOf(ConsoleLlmProvider);
+  });
+
+  it('allows loopback compatible endpoints in local-only mode', () => {
+    process.env.AI_LOCAL_ONLY = 'true';
+    process.env.LLM_PROVIDER = 'openai-compatible';
+    process.env.LLM_API_URL = 'http://127.0.0.1:11434/v1/chat/completions';
+    expect(createLlmProvider()).toBeInstanceOf(OpenAiCompatibleProvider);
+    expect(isLocalLlmUrl('https://public.example.com')).toBe(false);
   });
 });
 
@@ -131,5 +149,16 @@ describe('OpenAiCompatibleProvider', () => {
       'http://localhost:11434/v1/chat/completions',
     );
     await expect(provider.complete('sys', 'q')).resolves.toBe('compat');
+  });
+});
+
+describe('fetchWithTimeout', () => {
+  it('rejects a stalled request instead of waiting indefinitely', async () => {
+    jest.useFakeTimers();
+    stubFetch(() => new Promise(() => undefined));
+    const pending = fetchWithTimeout('http://localhost:11434', {}, 25);
+    const assertion = expect(pending).rejects.toThrow(/timed out/);
+    jest.advanceTimersByTime(25);
+    await assertion;
   });
 });

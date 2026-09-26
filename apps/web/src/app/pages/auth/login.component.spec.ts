@@ -13,11 +13,10 @@ const EN_DICT: Record<string, string> = {
   'login.invalidEmail': 'Enter a valid email.',
 };
 
-/** Flush the I18nService dictionary loads (en locale + baseline are both en). */
+/** Flush active Greek and English fallback dictionaries. */
 function flushI18n(httpMock: HttpTestingController): void {
-  httpMock
-    .match('i18n/en.json')
-    .forEach((req) => req.flush(EN_DICT));
+  httpMock.match('i18n/el.json').forEach((req) => req.flush(EN_DICT));
+  httpMock.match('i18n/en.json').forEach((req) => req.flush(EN_DICT));
 }
 
 function setInput(compiled: HTMLElement, id: string, value: string): void {
@@ -56,7 +55,9 @@ describe('LoginPage', () => {
     await fixture.whenStable();
     flushI18n(httpMock);
     const compiled = fixture.nativeElement as HTMLElement;
-    (compiled.querySelector('button[type="submit"]') as HTMLButtonElement).click();
+    (
+      compiled.querySelector('button[type="submit"]') as HTMLButtonElement
+    ).click();
     await fixture.whenStable();
     expect(compiled.textContent).toContain('Enter a valid email.');
   });
@@ -99,9 +100,12 @@ describe('LoginPage', () => {
       password: 'Password123!',
     });
     loginReq.flush({ accessToken: 'token-2' });
-    httpMock
-      .expectOne('/api/auth/me')
-      .flush({ id: 'u2', email: 'maria@demo.gr', role: 'RESIDENT', buildingId: 'b1' });
+    httpMock.expectOne('/api/auth/me').flush({
+      id: 'u2',
+      email: 'maria@demo.gr',
+      role: 'RESIDENT',
+      buildingId: 'b1',
+    });
 
     expect(auth.currentUser()?.role).toBe('RESIDENT');
     httpMock.verify();
@@ -120,7 +124,9 @@ describe('LoginPage', () => {
 
     setInput(compiled, 'email', 'admin@demo.gr');
     setInput(compiled, 'password', 'Admin1234!');
-    (compiled.querySelector('button[type="submit"]') as HTMLButtonElement).click();
+    (
+      compiled.querySelector('button[type="submit"]') as HTMLButtonElement
+    ).click();
 
     const loginReq = httpMock.expectOne('/api/auth/login');
     expect(loginReq.request.method).toBe('POST');
@@ -129,9 +135,12 @@ describe('LoginPage', () => {
       password: 'Admin1234!',
     });
     loginReq.flush({ accessToken: 'token-1' });
-    httpMock
-      .expectOne('/api/auth/me')
-      .flush({ id: 'u1', email: 'admin@demo.gr', role: 'ADMIN', buildingId: 'b1' });
+    httpMock.expectOne('/api/auth/me').flush({
+      id: 'u1',
+      email: 'admin@demo.gr',
+      role: 'ADMIN',
+      buildingId: 'b1',
+    });
 
     expect(auth.currentUser()?.role).toBe('ADMIN');
     httpMock.verify();

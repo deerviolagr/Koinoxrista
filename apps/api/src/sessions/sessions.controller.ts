@@ -24,14 +24,18 @@ import {
 
 /** Reads the raw refresh token from the request cookies (undefined if absent). */
 export function readRefreshCookie(req: HttpRequest): string | undefined {
-  const header = req.headers.cookie;
+  const header = req?.headers?.cookie;
   if (!header) return undefined;
   for (const part of header.split(';')) {
     const separator = part.indexOf('=');
     if (separator === -1) continue;
     const name = part.slice(0, separator).trim();
     if (name === REFRESH_COOKIE_NAME) {
-      return decodeURIComponent(part.slice(separator + 1).trim());
+      try {
+        return decodeURIComponent(part.slice(separator + 1).trim());
+      } catch {
+        return undefined;
+      }
     }
   }
   return undefined;
@@ -62,7 +66,11 @@ export class SessionsController {
     @Param('id') sessionId: string,
     @Req() req: HttpRequest,
   ): Promise<void> {
-    return this.sessionsService.revoke(user.id, sessionId, this.currentHash(req));
+    return this.sessionsService.revoke(
+      user.id,
+      sessionId,
+      this.currentHash(req),
+    );
   }
 
   @Post('revoke-others')

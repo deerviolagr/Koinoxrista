@@ -1,6 +1,11 @@
 import type { SubscriptionTier } from '@org/shared';
 
-import { planCreditRedemption } from './referral-calc';
+import { planCreditRedemption, monthlyFeeCents } from './referral-calc';
+
+// A recurring issuer can retry the same period concurrently.  The conditional
+// updateMany below is the durable guard; this small lock avoids duplicate work
+// (and makes the discount calculation deterministic) inside one process.
+const redemptionLocks = new Map<string, Promise<void>>();
 
 /**
  * Runtime credit redemption used by the self-billing recurring issuance.
@@ -66,35 +71,76 @@ export async function redeemReferralCredits(
   audit: CreditAuditSink,
   input: RedeemCreditsInput,
 ): Promise<number> {
-  const available = await prisma.referralCredit.findMany({
-    where: { buildingId: input.buildingId, usedAt: null },
-    orderBy: { createdAt: 'asc' },
-  });
-  const plan = planCreditRedemption(
-    input.chargeCents,
-    available.length,
-    input.tier,
-    input.units,
-  );
-  if (plan.monthsConsumed <= 0 || plan.discountCents <= 0) return 0;
+  if (!Number.isInteger(input.chargeCents) || input.chargeCents <= 0) {
+    return 0;
+  }
 
-  const consumedIds = available.slice(0, plan.monthsConsumed).map((c) => c.id);
-  const result = await prisma.referralCredit.updateMany({
-    where: { id: { in: consumedIds }, usedAt: null },
-    data: { usedAt: new Date(), usedPeriod: input.period },
+  const key = `${input.buildingId}:${input.period}`;
+  const previous = redemptionLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
   });
-  if (result.count === 0) return 0;
+  const queued = previous.then(() => current);
+  redemptionLocks.set(key, queued);
+  await previous;
+  try {
+    const available = (
+      await prisma.referralCredit.findMany({
+        where: { buildingId: input.buildingId, usedAt: null },
+        orderBy: { createdAt: 'asc' },
+      })
+    ).filter((credit) => credit.months === 1);
+    // Rows are atomic in the current model.  A multi-month row cannot be
+    // partially consumed, so leave it untouched rather than burning months
+    // that this invoice did not actually consume.
+    const plan = planCreditRedemption(
+      input.chargeCents,
+      available.length,
+      input.tier,
+      input.units,
+    );
+    if (plan.monthsConsumed <= 0 || plan.discountCents <= 0) return 0;
 
-  audit.record({
-    buildingId: input.buildingId,
-    action: 'referral.credit.redeemed',
-    entity: 'ReferralCredit',
-    entityId: consumedIds.join(','),
-    metadata: {
-      period: input.period,
-      monthsConsumed: Math.min(result.count, plan.monthsConsumed),
-      discountCents: plan.discountCents,
-    },
-  });
-  return plan.discountCents;
+    const consumedIds = available
+      .slice(0, plan.monthsConsumed)
+      .map((c) => c.id);
+    const usedAt = new Date();
+    const result = await prisma.referralCredit.updateMany({
+      where: { id: { in: consumedIds }, usedAt: null },
+      data: { usedAt, usedPeriod: input.period },
+    });
+    // A competing redemption may have claimed some of the proposed rows.
+    // Never award the originally planned discount for credits this call did
+    // not actually consume.
+    const consumedCount = Number.isFinite(result.count)
+      ? Math.min(result.count, consumedIds.length, plan.monthsConsumed)
+      : 0;
+    if (consumedCount <= 0) return 0;
+
+    const perMonth = monthlyFeeCents(input.tier, input.units);
+    const discountCents = Math.min(
+      input.chargeCents,
+      Math.max(0, consumedCount * perMonth),
+    );
+    if (discountCents <= 0) return 0;
+
+    audit.record({
+      buildingId: input.buildingId,
+      action: 'referral.credit.redeemed',
+      entity: 'ReferralCredit',
+      entityId: consumedIds.slice(0, consumedCount).join(','),
+      metadata: {
+        period: input.period,
+        monthsConsumed: consumedCount,
+        discountCents,
+      },
+    });
+    return discountCents;
+  } finally {
+    release();
+    if (redemptionLocks.get(key) === queued) {
+      redemptionLocks.delete(key);
+    }
+  }
 }

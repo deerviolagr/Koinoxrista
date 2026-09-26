@@ -15,6 +15,8 @@ export interface MyDataSubmitInput {
   issueDate?: string;
   /** AADE document-type code (2.1 = service invoice); defaults to 2.1. */
   invoiceType?: string;
+  /** Explicit ISO currency. Live GR submissions reject an omitted value. */
+  currency?: string;
   /** Income classification, e.g. category1_1 / E3_561_001. */
   classificationCategory?: string;
   classificationType?: string;
@@ -43,6 +45,9 @@ export const MYDATA_PROVIDER = Symbol('MYDATA_PROVIDER');
 /** Offline mode: deterministic synthetic MARK, no network calls. */
 export class OfflineMyDataProvider implements MyDataProvider {
   async submit(invoice: MyDataSubmitInput): Promise<MyDataSubmitResult> {
+    if (invoice.currency && invoice.currency.toUpperCase() !== 'EUR') {
+      throw new Error('The offline myDATA provider only accepts explicit EUR records');
+    }
     const digest = createHash('sha1')
       .update(invoice.invoiceId)
       .digest('hex')

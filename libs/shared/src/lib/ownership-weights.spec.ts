@@ -1,5 +1,6 @@
 import {
   DEFAULT_OWNERSHIP_BASIS,
+  IncompleteOwnershipWeightError,
   resolveOwnershipBasis,
   totalOwnershipWeight,
   unitOwnershipWeight,
@@ -49,5 +50,38 @@ describe('ownership weights (P0-3)', () => {
       { id: 'b', millimes: 500, squareMeters: null, shareFraction: 0 },
     ];
     expect(resolveOwnershipBasis(units)).toBe('MILLIMES');
+  });
+
+  it('rejects a partially populated international basis', () => {
+    expect(() =>
+      resolveOwnershipBasis([
+        { millimes: 500, shareFraction: 500 },
+        { millimes: 500, shareFraction: null },
+      ]),
+    ).toThrow(IncompleteOwnershipWeightError);
+    expect(() =>
+      resolveOwnershipBasis([
+        { millimes: 500, squareMeters: 50 },
+        { millimes: 500, squareMeters: undefined },
+      ]),
+    ).toThrow(IncompleteOwnershipWeightError);
+    expect(() =>
+      resolveOwnershipBasis([
+        { millimes: 500, shareFraction: 500, squareMeters: 50 },
+        { millimes: 500, shareFraction: 500 },
+      ]),
+    ).toThrow(IncompleteOwnershipWeightError);
+  });
+
+  it('does not let an explicit basis turn a missing weight into zero', () => {
+    expect(() =>
+      totalOwnershipWeight(
+        [
+          { millimes: 500, shareFraction: 500 },
+          { millimes: 500, shareFraction: null },
+        ],
+        'SHARE_FRACTION',
+      ),
+    ).toThrow(IncompleteOwnershipWeightError);
   });
 });

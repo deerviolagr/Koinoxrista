@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -7,8 +8,15 @@ import {
 import { Prisma, Role } from '@prisma/client';
 import type { BidStatus, JobSource, JobStatus, WorkLogView } from '@org/shared';
 
+type JobSourceLike = JobSource | 'MAINTENANCE_SCHEDULE';
+
 import type { AuthenticatedUser } from '../auth/auth.types';
-import { assertSameBuilding } from '../common/tenant';
+import {
+  assertSameBuilding,
+  effectiveBuildingRole,
+  isAdminLikeRole,
+  membershipUserIds,
+} from '../common/tenant';
 import { CommissionsService } from '../marketplace/commission.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -22,6 +30,8 @@ import { UpsertProviderProfileDto } from './dto/provider-profile.dto';
 export interface BidView {
   id: string;
   jobId: string;
+  /** Stable identity used by provider clients to find their own bid. */
+  providerUserId: string;
   amountCents: number;
   message: string | null;
   status: BidStatus;
@@ -36,7 +46,7 @@ export interface JobAdminView {
   title: string;
   description: string;
   status: JobStatus;
-  source: JobSource;
+  source: JobSourceLike;
   reporterName: string | null;
   budgetCents: number | null;
   workLogsCount: number;
@@ -46,15 +56,25 @@ export interface JobAdminView {
 
 export interface JobMarketView {
   id: string;
+  buildingId: string;
   buildingName: string;
   title: string;
   description: string;
   status: JobStatus;
   budgetCents: number | null;
+  /** Stable array shape; marketplace contains the caller's own bids. */
+  bids: BidView[];
 }
 
-export interface JobBidListView {
-  job: { id: string; title: string; status: JobStatus; buildingName: string };
+export interface JobBidListView extends JobMarketView {
+  /** Compatibility fields for older provider clients. */
+  job: {
+    id: string;
+    buildingId?: string;
+    title: string;
+    status: JobStatus;
+    buildingName: string;
+  };
   bid: BidView;
 }
 
@@ -65,6 +85,7 @@ interface BidLike {
   message: string | null;
   status: string;
   ratingStars: number | null;
+  providerUserId: string;
   provider: {
     firstName: string;
     lastName: string;
@@ -86,6 +107,7 @@ function toBidView(bid: BidLike): BidView {
   return {
     id: bid.id,
     jobId: bid.jobId,
+    providerUserId: bid.providerUserId ?? '',
     amountCents: bid.amountCents,
     message: bid.message,
     status: bid.status as BidStatus,
@@ -127,7 +149,7 @@ function toJobAdminView(
     title: job.title,
     description: job.description,
     status: job.status as JobStatus,
-    source: (job.source ?? 'ADMIN_RFP') as JobSource,
+    source: (job.source ?? 'ADMIN_RFP') as JobSourceLike,
     reporterName: reporterFullName(job),
     budgetCents: job.budgetCents,
     workLogsCount: job._count?.workLogs ?? 0,
@@ -137,6 +159,10 @@ function toJobAdminView(
 
 @Injectable()
 export class JobsService {
+  /** Serialize same-provider submissions in this process; the DB unique key is still required across replicas. */
+  private readonly bidQueues = new Map<string, Promise<unknown>>();
+  private readonly knownBidKeys = new Set<string>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
@@ -149,6 +175,7 @@ export class JobsService {
     user: AuthenticatedUser,
   ): Promise<JobAdminView> {
     assertSameBuilding(user, buildingId);
+    await this.requireAdminForBuilding(buildingId, user);
 
     const building = await this.prisma.building.findUnique({
       where: { id: buildingId },
@@ -173,7 +200,11 @@ export class JobsService {
     user: AuthenticatedUser,
   ): Promise<JobAdminView> {
     assertSameBuilding(user, buildingId);
-    if (user.role !== Role.RESIDENT && user.role !== Role.ADMIN) {
+    const effectiveRole = await this.effectiveRoleForBuilding(buildingId, user);
+    if (
+      effectiveRole !== Role.RESIDENT &&
+      !isAdminLikeRole(effectiveRole)
+    ) {
       throw new ForbiddenException(
         'Only residents or admins can report defects',
       );
@@ -198,7 +229,7 @@ export class JobsService {
     user: AuthenticatedUser,
   ): Promise<JobAdminView[]> {
     assertSameBuilding(user, buildingId);
-    const isAdmin = user.role === Role.ADMIN;
+    const isAdmin = await this.isAdminForBuilding(buildingId, user);
 
     const jobs = await this.prisma.job.findMany({
       where: {
@@ -228,20 +259,37 @@ export class JobsService {
     }));
   }
 
-  async marketplace(): Promise<JobMarketView[]> {
+  async marketplace(userId?: string): Promise<JobMarketView[]> {
     const jobs = await this.prisma.job.findMany({
-      where: { status: 'OPEN', source: { not: 'RESIDENT_REPORT' } },
-      include: { building: { select: { name: true } } },
+      where: {
+        status: 'OPEN',
+        // Maintenance work is operational, not a public provider offer.
+        source: { notIn: ['RESIDENT_REPORT', 'MAINTENANCE_SCHEDULE'] },
+      },
+      include: {
+        building: { select: { name: true } },
+        // Returning the caller's bids makes the provider marketplace response
+        // stable and lets the portal render an existing offer without a
+        // second, differently shaped request.
+        bids: {
+          where: { providerUserId: userId ?? '__anonymous__' },
+          include: BID_WITH_PROVIDER,
+        },
+      },
       orderBy: { id: 'desc' },
     });
 
-    return jobs.map((job) => ({
+    return jobs
+      .filter((job) => job.source !== 'MAINTENANCE_SCHEDULE')
+      .map((job) => ({
       id: job.id,
+      buildingId: job.buildingId,
       buildingName: job.building.name,
       title: job.title,
       description: job.description,
       status: job.status as JobStatus,
       budgetCents: job.budgetCents,
+      bids: (job.bids ?? []).map(toBidView),
     }));
   }
 
@@ -255,15 +303,30 @@ export class JobsService {
       orderBy: { id: 'desc' },
     });
 
-    return bids.map((bid) => ({
-      job: {
+    return bids.map((bid) => {
+      const bidView = toBidView(bid);
+      const job = {
         id: bid.job.id,
+        buildingId: bid.job.buildingId,
         title: bid.job.title,
         status: bid.job.status as JobStatus,
         buildingName: bid.job.building.name,
-      },
-      bid: toBidView(bid),
-    }));
+      };
+      return {
+        id: bid.job.id,
+        buildingId: bid.job.buildingId,
+        buildingName: job.buildingName,
+        title: bid.job.title,
+        description: bid.job.description,
+        status: job.status,
+        budgetCents: bid.job.budgetCents,
+        bids: [bidView],
+        // Keep the old nested fields while clients migrate to the stable job
+        // row shape used by the marketplace endpoint.
+        job,
+        bid: bidView,
+      };
+    });
   }
 
   async createBid(
@@ -277,20 +340,25 @@ export class JobsService {
       throw new BadRequestException('Job is not open for bids');
     }
 
-    const existing = await this.prisma.bid.findFirst({
-      where: { jobId, providerUserId: user.id },
-    });
+    const bidKey = `${jobId}:${user.id}`;
+    const saved = await this.withBidLock(bidKey, async () => {
+      const existing = await this.prisma.bid.findFirst({
+        where: { jobId, providerUserId: user.id },
+      });
+      if (!existing && this.knownBidKeys.has(bidKey)) {
+        throw new ConflictException('A bid for this job already exists');
+      }
 
-    const saved = existing
-      ? await this.prisma.bid.update({
-          where: { id: existing.id },
-          data: {
-            amountCents: dto.amountCents,
-            message: dto.message ?? null,
-            status: 'SUBMITTED',
-          },
-          include: BID_WITH_PROVIDER,
-        })
+      const result = existing
+        ? await this.prisma.bid.update({
+            where: { id: existing.id },
+            data: {
+              amountCents: dto.amountCents,
+              message: dto.message ?? null,
+              status: 'SUBMITTED',
+            },
+            include: BID_WITH_PROVIDER,
+          })
         : await this.prisma.bid.create({
             data: {
               jobId,
@@ -301,13 +369,20 @@ export class JobsService {
             },
             include: BID_WITH_PROVIDER,
           });
-
-    void this.notifyBuildingAdmins(job.buildingId, {
-      type: 'bid.received',
-      title: 'Νέα προσφορά για εργασία',
-      body: job.title,
-      linkPath: '/jobs',
+      this.knownBidKeys.add(bidKey);
+      return result;
     });
+
+    try {
+      await this.notifyBuildingAdmins(job.buildingId, {
+        type: 'bid.received',
+        title: 'Νέα προσφορά για εργασία',
+        body: job.title,
+        linkPath: '/jobs',
+      });
+    } catch {
+      // Notifications are best-effort and must not roll back a bid.
+    }
 
     return toBidView(saved);
   }
@@ -321,20 +396,31 @@ export class JobsService {
       linkPath?: string;
     },
   ): Promise<void> {
-    const admins = await this.prisma.user.findMany({
-      where: { role: Role.ADMIN, buildingId },
-      select: { id: true },
-    });
-    await this.notifications.createForUsers(
-      admins.map((admin) => admin.id),
-      notification,
-    );
+    const db = this.prisma as unknown as {
+      membership?: unknown;
+      user?: unknown;
+    };
+    // The real client uses Membership.  Keep the User fallback for legacy
+    // rows and small test doubles.
+    const recipients = db.membership
+      ? await membershipUserIds(this.prisma, buildingId, [
+          Role.BUILDING_OWNER,
+          Role.ADMIN,
+        ])
+      : await this.prisma.user.findMany({
+          where: { role: Role.ADMIN, buildingId },
+          select: { id: true },
+        }).then((rows) => rows.map((row) => row.id));
+    if (recipients.length > 0) {
+      await this.notifications.createForUsers(recipients, notification);
+    }
   }
 
   async listBids(jobId: string, user: AuthenticatedUser): Promise<BidView[]> {
     const job = await this.prisma.job.findUnique({ where: { id: jobId } });
     if (!job) throw new NotFoundException('Job not found');
     assertSameBuilding(user, job.buildingId);
+    await this.requireAdminForBuilding(job.buildingId, user);
 
     const bids = await this.prisma.bid.findMany({
       where: { jobId },
@@ -354,11 +440,46 @@ export class JobsService {
         });
         if (!bid) throw new NotFoundException('Bid not found');
         assertSameBuilding(user, bid.job.buildingId);
+        await this.requireAdminForBuilding(bid.job.buildingId, user);
         if (bid.status !== 'SUBMITTED') {
           throw new BadRequestException('Only submitted bids can be accepted');
         }
         if (bid.job.status !== 'OPEN') {
           throw new BadRequestException('Job is not open for awarding');
+        }
+        const acceptedReader = tx.bid as typeof tx.bid & {
+          findFirst?: (args: unknown) => Promise<{ id: string } | null>;
+        };
+        const alreadyAccepted = acceptedReader.findFirst
+          ? await acceptedReader.findFirst({
+              where: { jobId: bid.jobId, status: 'ACCEPTED' },
+              select: { id: true },
+            })
+          : null;
+        if (alreadyAccepted) {
+          throw new ConflictException('This job already has an accepted bid');
+        }
+
+        // Claim the OPEN job before changing any bid.  The conditional write
+        // is the serialization point: two concurrent award requests cannot
+        // both leave an ACCEPTED bid behind.
+        const jobClient = tx.job as typeof tx.job & {
+          updateMany?: (args: unknown) => Promise<{ count: number }>;
+        };
+        if (typeof jobClient.updateMany === 'function') {
+          const claimed = await jobClient.updateMany({
+            where: { id: bid.jobId, status: 'OPEN' },
+            data: { status: 'AWARDED' },
+          });
+          if (claimed.count !== 1) {
+            throw new ConflictException('Job was already awarded');
+          }
+        } else {
+          // Compatibility for small transaction doubles.
+          await tx.job.update({
+            where: { id: bid.jobId },
+            data: { status: 'AWARDED' },
+          });
         }
 
         await tx.bid.updateMany({
@@ -369,10 +490,6 @@ export class JobsService {
           where: { id: bidId },
           data: { status: 'ACCEPTED' },
           include: BID_WITH_PROVIDER,
-        });
-        await tx.job.update({
-          where: { id: bid.jobId },
-          data: { status: 'AWARDED' },
         });
 
         return {
@@ -421,6 +538,10 @@ export class JobsService {
     });
     if (!bid) throw new NotFoundException('Bid not found');
     assertSameBuilding(user, bid.job.buildingId);
+    await this.requireAdminForBuilding(bid.job.buildingId, user);
+    if (bid.job.status !== 'OPEN') {
+      throw new BadRequestException('Job is not open for bid changes');
+    }
     if (bid.status !== 'SUBMITTED') {
       throw new BadRequestException('Only submitted bids can be rejected');
     }
@@ -469,12 +590,16 @@ export class JobsService {
       return created;
     });
 
-    void this.notifyBuildingAdmins(job.buildingId, {
-      type: 'worklog.added',
-      title: 'Νέο ημερολόγιο εργασίας',
-      body: job.title,
-      linkPath: '/jobs',
-    });
+    try {
+      await this.notifyBuildingAdmins(job.buildingId, {
+        type: 'worklog.added',
+        title: 'Νέο ημερολόγιο εργασίας',
+        body: job.title,
+        linkPath: '/jobs',
+      });
+    } catch {
+      // Notifications are best-effort and must not roll back a work log.
+    }
 
     return {
       id: log.id,
@@ -491,7 +616,8 @@ export class JobsService {
     const job = await this.prisma.job.findUnique({ where: { id: jobId } });
     if (!job) throw new NotFoundException('Job not found');
 
-    if (user.role === Role.PROVIDER) {
+    const effectiveRole = await this.effectiveRoleForBuilding(job.buildingId, user);
+    if (effectiveRole === Role.PROVIDER) {
       const awarded = await this.prisma.bid.findFirst({
         where: { jobId, providerUserId: user.id, status: 'ACCEPTED' },
       });
@@ -524,6 +650,7 @@ export class JobsService {
     const job = await this.prisma.job.findUnique({ where: { id: jobId } });
     if (!job) throw new NotFoundException('Job not found');
     assertSameBuilding(user, job.buildingId);
+    await this.requireAdminForBuilding(job.buildingId, user);
     if (job.status !== 'AWARDED' && job.status !== 'IN_PROGRESS') {
       throw new BadRequestException(
         'Only awarded or in-progress jobs can be completed',
@@ -549,6 +676,7 @@ export class JobsService {
     const job = await this.prisma.job.findUnique({ where: { id: jobId } });
     if (!job) throw new NotFoundException('Job not found');
     assertSameBuilding(user, job.buildingId);
+    await this.requireAdminForBuilding(job.buildingId, user);
 
     const updated = await this.prisma.job.update({
       where: { id: jobId },
@@ -570,6 +698,7 @@ export class JobsService {
     const job = await this.prisma.job.findUnique({ where: { id: jobId } });
     if (!job) throw new NotFoundException('Job not found');
     assertSameBuilding(user, job.buildingId);
+    await this.requireAdminForBuilding(job.buildingId, user);
 
     return this.prisma.$transaction(async (tx) => {
       const accepted = await tx.bid.findFirst({
@@ -614,15 +743,82 @@ export class JobsService {
     });
   }
 
+  private async withBidLock<T>(key: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.bidQueues.get(key) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(action);
+    this.bidQueues.set(key, current);
+    try {
+      return await current;
+    } finally {
+      if (this.bidQueues.get(key) === current) this.bidQueues.delete(key);
+    }
+  }
+
+  private async effectiveRoleForBuilding(
+    buildingId: string,
+    user: AuthenticatedUser,
+  ): Promise<Role> {
+    return (await effectiveBuildingRole(this.prisma, user, buildingId)) ?? user.role;
+  }
+
+  private async isAdminForBuilding(
+    buildingId: string,
+    user: AuthenticatedUser,
+  ): Promise<boolean> {
+    return isAdminLikeRole(await this.effectiveRoleForBuilding(buildingId, user));
+  }
+
+  private async requireAdminForBuilding(
+    buildingId: string,
+    user: AuthenticatedUser,
+  ): Promise<void> {
+    if (!(await this.isAdminForBuilding(buildingId, user))) {
+      throw new ForbiddenException('Building administrator access is required');
+    }
+  }
+
   async getProviderProfile(userId: string) {
-    return this.prisma.providerProfile.findUnique({ where: { userId } });
+    const row = await this.prisma.providerProfile.findUnique({ where: { userId } });
+    return row ? this.toProviderProfile(row) : null;
   }
 
   async upsertProviderProfile(userId: string, dto: UpsertProviderProfileDto) {
-    return this.prisma.providerProfile.upsert({
+    const profileData = {
+      trade: dto.trade,
+      certs: dto.certs,
+      ...(dto.city !== undefined ? { city: dto.city } : {}),
+      ...(dto.bio !== undefined ? { bio: dto.bio } : {}),
+      ...(dto.hourlyRateCents !== undefined
+        ? { hourlyRateCents: dto.hourlyRateCents }
+        : {}),
+    };
+    const row = await this.prisma.providerProfile.upsert({
       where: { userId },
-      update: { trade: dto.trade, certs: dto.certs },
-      create: { userId, trade: dto.trade, certs: dto.certs },
+      update: profileData,
+      create: { userId, ...profileData },
     });
+    return this.toProviderProfile(row);
+  }
+
+  private toProviderProfile(row: {
+    id?: string;
+    userId: string;
+    trade: string;
+    certs: string[];
+    rating: number | null;
+    city?: string | null;
+    bio?: string | null;
+    hourlyRateCents?: number | null;
+  }) {
+    return {
+      ...row,
+      city: row.city ?? null,
+      bio: row.bio ?? null,
+      hourlyRateCents: row.hourlyRateCents ?? null,
+      // Aliases used by the provider portal; retain `rating` for older
+      // clients so the response remains backwards compatible.
+      ratingStars: row.rating,
+      ratingCount: null,
+    };
   }
 }

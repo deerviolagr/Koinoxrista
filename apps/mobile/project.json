@@ -4,11 +4,42 @@
   "projectType": "application",
   "sourceRoot": "apps/mobile/src",
   "targets": {
-    "test": {
+    "start": {
       "executor": "nx:run-commands",
+      "cache": false,
       "options": {
         "cwd": "apps/mobile",
-        "command": "npx vitest run"
+        "command": "pnpm exec expo start --port 8081"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": ["production", "^production"],
+      "outputs": ["{workspaceRoot}/dist/apps/mobile"],
+      "options": {
+        "cwd": "apps/mobile",
+        "command": "pnpm exec expo export --clear --max-workers 1 --platform web --output-dir ../../dist/apps/mobile"
+      }
+    },
+    "export": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": ["production", "^production"],
+      "outputs": ["{workspaceRoot}/dist/apps/mobile"],
+      "options": {
+        "cwd": "apps/mobile",
+        "command": "pnpm exec expo export --clear --max-workers 1 --platform web --output-dir ../../dist/apps/mobile"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": ["default", "^production"],
+      "outputs": ["{workspaceRoot}/coverage/apps/mobile"],
+      "options": {
+        "cwd": "apps/mobile",
+        "command": "pnpm exec vitest run --config vitest.config.mjs"
       }
     }
   }

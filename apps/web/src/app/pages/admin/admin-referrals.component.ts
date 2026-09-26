@@ -21,7 +21,8 @@ import { ToastService } from '../../ui/toast.service';
       <div class="card text-sm text-slate-500">Φόρτωση…</div>
     } @else if (loadError() || !info()) {
       <div class="card border-red-200 bg-red-50 text-sm text-red-700">
-        Αποτυχία φόρτωσης. Δοκιμάστε ξανά.
+        <p>Αποτυχία φόρτωσης.</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="loadBuilding()">Δοκιμή ξανά</button>
       </div>
     } @else {
       <div class="grid gap-6 lg:grid-cols-3">
@@ -118,9 +119,21 @@ export class AdminReferralsPage implements OnInit {
   private buildingId: string | null = null;
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    this.loading.set(true);
+    this.loadError.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.reload();
@@ -132,13 +145,19 @@ export class AdminReferralsPage implements OnInit {
     return current ? this.referralsApi.referralLink(current) : '';
   }
 
-  protected copyLink(): void {
+  protected async copyLink(): Promise<void> {
     const url = this.link();
     if (!url) return;
-    void navigator.clipboard
-      ?.writeText(url)
-      .then(() => this.toast.success('Ο σύνδεσμος αντιγράφηκε.'))
-      .catch(() => this.toast.error('Η αντιγραφή απέτυχε.'));
+    if (!navigator.clipboard) {
+      this.toast.error('Η αντιγραφή δεν υποστηρίζεται από τον browser.');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      this.toast.success('Ο σύνδεσμος αντιγράφηκε.');
+    } catch {
+      this.toast.error('Η αντιγραφή απέτυχε.');
+    }
   }
 
   protected rotate(): void {
@@ -146,7 +165,6 @@ export class AdminReferralsPage implements OnInit {
     this.rotating.set(true);
     this.referralsApi
       .rotateCode(this.buildingId)
-      .pipe(catchError(() => EMPTY))
       .subscribe({
         next: ({ code }) => {
           this.rotating.set(false);
@@ -172,6 +190,7 @@ export class AdminReferralsPage implements OnInit {
 
   private reload(): void {
     if (!this.buildingId) return;
+    this.loading.set(true);
     this.loadError.set(false);
     this.referralsApi
       .info(this.buildingId)

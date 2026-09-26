@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -8,7 +7,7 @@ import { Role } from '@prisma/client';
 
 import { AuditService } from '../audit/audit.service';
 import type { AuthenticatedUser } from '../auth/auth.types';
-import { assertSameBuilding } from '../common/tenant';
+import { assertSameBuilding, membershipUserIds } from '../common/tenant';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateAssetDto, ASSET_CATEGORIES } from './dto/create-asset.dto';
@@ -22,6 +21,21 @@ const DEFAULT_UPCOMING_DAYS = 30;
 const GENERATE_WINDOW_DAYS = 30;
 const MAINTENANCE_DUE_TYPE = 'maintenance.due';
 const MAINTENANCE_LINK_PATH = '/admin/maintenance';
+export const MAINTENANCE_JOB_SOURCE = 'MAINTENANCE_SCHEDULE';
+export const MAINTENANCE_JOB_TYPE = 'maintenance.schedule';
+
+export function maintenanceJobType(scheduleId: string): string {
+  return `${MAINTENANCE_JOB_TYPE}:${scheduleId}`;
+}
+
+/**
+ * Stable identity for one due occurrence.  The schedule row itself is not an
+ * occurrence: after markDone its nextDueAt changes and a new job is due.  A
+ * schedule id + exact UTC due timestamp is therefore the idempotency key.
+ */
+export function maintenanceOccurrenceKey(scheduleId: string, nextDueAt: Date): string {
+  return `${scheduleId}@${nextDueAt.toISOString()}`;
+}
 
 export const ASSET_CATEGORY_VALUES: string[] = [...ASSET_CATEGORIES];
 
@@ -60,6 +74,14 @@ function parseCategory(category: string | undefined): string | undefined {
     throw new BadRequestException(`Invalid category: ${category}`);
   }
   return category;
+}
+
+function isUniqueConflict(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: string }).code === 'P2002'
+  );
 }
 
 @Injectable()
@@ -358,10 +380,10 @@ export class MaintenanceService {
   }
 
   /**
-   * Finds schedules where nextDueAt <= now+30d and autoCreateJob, creates draft Job
-   * (status OPEN, source MAINTENANCE_SCHEDULE) if not already created for this due window
-   * (idempotency via checking existing jobs with same title+buildingId within window),
-   * sends Notification to admins.
+   * Finds schedules due in the next 30 days and materializes one job per
+   * schedule occurrence. JobRun's unique (buildingId, jobType, period) key is
+   * the concurrency-safe occurrence ledger; the marker in the description is a
+   * useful migration/debug fallback for installations without JobRun rows.
    */
   async generateDueJobs(buildingId: string, user: AuthenticatedUser) {
     assertSameBuilding(user, buildingId);
@@ -381,79 +403,99 @@ export class MaintenanceService {
       return { created: 0, skipped: 0 };
     }
 
-    const admins = await (this.prisma as any).user.findMany({
-      where: { role: Role.ADMIN, buildingId },
-      select: { id: true },
-    });
+    const db = this.prisma as any;
+    const admins = db.membership
+      ? await membershipUserIds(this.prisma, buildingId, [
+          Role.ADMIN,
+          Role.BUILDING_OWNER,
+        ])
+      : await db.user.findMany({
+          where: { role: Role.ADMIN, buildingId },
+          select: { id: true },
+        }).then((rows: Array<{ id: string }>) => rows.map((row) => row.id));
 
     let created = 0;
     let skipped = 0;
 
     for (const schedule of due as any[]) {
-      // Idempotency: check existing jobs with same title+buildingId within window.
-      // Window = last 30 days OR any job with same title+buildingId and source MAINTENANCE_SCHEDULE
-      // Since Job has no createdAt, we approximate by title+buildingId+source existence,
-      // but if Job has createdAt we use window filter when available.
-      const existingWhere: any = {
-        buildingId,
-        title: schedule.title,
-        source: 'MAINTENANCE_SCHEDULE',
-      };
+      const occurrence = maintenanceOccurrenceKey(schedule.id, schedule.nextDueAt);
+      const period = schedule.nextDueAt.toISOString();
+      const description = `${schedule.title} — ${schedule.asset?.name ?? 'Asset'} (προγραμματισμένη συντήρηση) [${occurrence}]`;
+      let madeJob = false;
 
-      // Try window-aware check if prisma.job supports createdAt filter; fallback to title check
-      let existing: any = null;
       try {
-        // Attempt to query with createdAt window if field exists; prisma will ignore unknown? We guard.
-        // We do a broad check first.
-        existing = await (this.prisma as any).job.findFirst({ where: existingWhere });
-        // If we want window semantics and createdAt exists, do extra filtering by checking recent jobs
-        // We attempt a second query with time window if the model has createdAt field (try/catch)
-        // The simple existence check already satisfies idempotency spec for interview task.
-      } catch {
-        existing = null;
+        if (
+          db.jobRun?.create &&
+          db.jobRun.update &&
+          typeof db.$transaction === 'function'
+        ) {
+          await db.$transaction(async (tx: any) => {
+            // The unique JobRun row is claimed before the Job insert. A second
+            // scheduler/replica gets P2002 and skips this occurrence.
+            const run = await tx.jobRun.create({
+              data: {
+                buildingId,
+                jobType: maintenanceJobType(schedule.id),
+                period,
+                status: 'RUNNING',
+              },
+            });
+            await tx.job.create({
+              data: {
+                buildingId,
+                title: schedule.title,
+                description,
+                status: 'OPEN',
+                source: MAINTENANCE_JOB_SOURCE,
+              },
+            });
+            await tx.jobRun.update({
+              where: { id: run.id },
+              data: { status: 'SUCCESS', finishedAt: new Date() },
+            });
+          });
+        } else {
+          // Legacy/test fallback. Do not use this broad title check when the
+          // real JobRun ledger is available; it would suppress the next
+          // occurrence months later.
+          const existing = await db.job.findFirst({
+            where: {
+              buildingId,
+              source: MAINTENANCE_JOB_SOURCE,
+              description: { contains: `[${occurrence}]` },
+            },
+          });
+          if (existing) {
+            skipped += 1;
+            continue;
+          }
+          await db.job.create({
+            data: {
+              buildingId,
+              title: schedule.title,
+              description,
+              status: 'OPEN',
+              source: MAINTENANCE_JOB_SOURCE,
+            },
+          });
+        }
+        madeJob = true;
+        created += 1;
+      } catch (error: unknown) {
+        if (isUniqueConflict(error)) {
+          skipped += 1;
+          continue;
+        }
+        throw error;
       }
 
-      // If using window-based idempotency, we could also search jobs with same title within 30d via additional logic
-      // For specs: we treat any existing job with same title as duplicate for current window.
-      // After schedule is marked done and nextDueAt moves, the same title will still match old job,
-      // but generateDueJobs should still create a new job only when nextDueAt is again due.
-      // To handle that, we check if existing job was already created for THIS dueAt window:
-      // We store due window in job description containing nextDueAt ISO, or compare nextDueAt vs job creation.
-      // Simpler: if existing job's title matches and schedule.nextDueAt <= cutoff, we still skip if any job exists.
-      // This means after first generation, subsequent generate calls before markDone are idempotent (skipped),
-      // after markDone moves nextDueAt forward beyond cutoff, due will be empty anyway, so no duplicate.
-      // For future intervals when schedule becomes due again (after months), the old job still exists but
-      // schedule.nextDueAt will again be <= cutoff, and we'd incorrectly skip. To avoid that, we need a window.
-      // We implement window-aware idempotency when possible: if job has createdAt, only skip if created recently.
-      // Since prisma mock in tests may not have createdAt, we fall back to title existence but spec test will
-      // expect second call to skip (skipped count). For future intervals, markDone updates nextDueAt so due won't include it again until due.
-
-      if (existing) {
-        skipped += 1;
-        continue;
-      }
-
-      await (this.prisma as any).job.create({
-        data: {
-          buildingId,
-          title: schedule.title,
-          description: `${schedule.title} — ${schedule.asset?.name ?? 'Asset'} (προγραμματισμένη συντήρηση)`,
-          status: 'OPEN',
-          source: 'MAINTENANCE_SCHEDULE',
-        },
-      });
-      created += 1;
-
-      if (admins.length > 0) {
-        await this.notifications.createForUsers(
-          admins.map((a: any) => a.id),
-          {
-            type: MAINTENANCE_DUE_TYPE,
-            title: `Συντήρηση οφειλόμενη: ${schedule.title}`,
-            body: `${schedule.asset?.name ?? ''} — λήξη ${schedule.nextDueAt?.toISOString?.().slice(0, 10) ?? ''}`,
-            linkPath: MAINTENANCE_LINK_PATH,
-          },
-        );
+      if (madeJob && admins.length > 0) {
+        await this.notifications.createForUsers(admins, {
+          type: MAINTENANCE_DUE_TYPE,
+          title: `Συντήρηση οφειλόμενη: ${schedule.title}`,
+          body: `${schedule.asset?.name ?? ''} — λήξη ${schedule.nextDueAt?.toISOString?.().slice(0, 10) ?? ''}`,
+          linkPath: MAINTENANCE_LINK_PATH,
+        });
       }
     }
 

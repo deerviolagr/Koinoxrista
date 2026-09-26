@@ -1,4 +1,5 @@
 import axios, { AxiosInstance, AxiosResponse } from 'axios';
+import { minorUnitsToMajor } from '@org/shared';
 
 import type {
   MyDataPollResult,
@@ -111,7 +112,9 @@ function escapeXml(value: string | number): string {
     .replaceAll('"', '&quot;');
 }
 
-const euros = (cents: number): string => (cents / 100).toFixed(2);
+function euros(minorUnits: number): string {
+  return minorUnitsToMajor(minorUnits, 'EUR').toFixed(2);
+}
 
 /** AADE VAT-category codes keyed by the effective percentage rate. */
 const VAT_CATEGORY_BY_RATE: Record<number, string> = {
@@ -133,8 +136,6 @@ function vatCategory(netCents: number, vatCents: number): string {
 const DEFAULT_INVOICE_TYPE = '2.1'; // service provision invoice
 const DEFAULT_CLASSIFICATION_CATEGORY = 'category1_1';
 const DEFAULT_CLASSIFICATION_TYPE = 'E3_561_001';
-const CURRENCY = 'EUR';
-
 function incomeClassification(
   category: string,
   type: string,
@@ -149,12 +150,24 @@ function incomeClassification(
   ].join('');
 }
 
+function explicitAadeCurrency(invoice: MyDataSubmitInput): string {
+  const currency = (invoice.currency ?? '').toUpperCase();
+  if (currency !== 'EUR') {
+    throw new SubmissionError(
+      'myDATA live submissions require an explicit EUR currency',
+      { permanent: true },
+    );
+  }
+  return currency;
+}
+
 /**
  * XSD-compliant InvoicesDoc (v1.0.x) sent as the URL-encoded `invoice`
  * form field: issue metadata, payment method, line details with income
  * classification, and an invoiceSummary with document totals.
  */
 function invoicePayload(invoice: MyDataSubmitInput): string {
+  const currency = explicitAadeCurrency(invoice);
   const grossCents = invoice.netAmountCents + invoice.vatAmountCents;
   const issueDate = invoice.issueDate ?? new Date().toISOString().slice(0, 10);
   const classification = incomeClassification(
@@ -168,7 +181,7 @@ function invoicePayload(invoice: MyDataSubmitInput): string {
     `<aa>${invoice.seqNo}</aa>`,
     `<issueDate>${escapeXml(issueDate)}</issueDate>`,
     `<invoiceType>${escapeXml(invoice.invoiceType ?? DEFAULT_INVOICE_TYPE)}</invoiceType>`,
-    `<currency>${CURRENCY}</currency>`,
+    `<currency>${escapeXml(currency)}</currency>`,
     '<paymentMethods><paymentMethod>',
     `<type>${escapeXml(invoice.paymentMethodCode)}</type>`,
     `<amount>${euros(grossCents)}</amount>`,
@@ -235,6 +248,9 @@ export class LiveAadeMyDataProvider implements MyDataProvider {
   private async submitOnce(
     invoice: MyDataSubmitInput,
   ): Promise<MyDataSubmitResult> {
+    // Reject an invalid currency before acquiring an OAuth token or touching
+    // the network; the adapter must never guess a currency for AADE.
+    explicitAadeCurrency(invoice);
     const token = await this.accessToken();
     let response: AxiosResponse<unknown>;
     try {

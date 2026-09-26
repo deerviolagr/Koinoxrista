@@ -4,13 +4,20 @@ import {
   HttpTestingController,
   provideHttpClientTesting,
 } from '@angular/common/http/testing';
-import { ActivatedRouteSnapshot, RouterStateSnapshot, UrlTree } from '@angular/router';
+import {
+  ActivatedRouteSnapshot,
+  RouterStateSnapshot,
+  UrlTree,
+} from '@angular/router';
 import { provideRouter } from '@angular/router';
 import { App } from './app';
 import { AuthService } from './core/auth.service';
-import { canActivateRole, homeForRole } from './core/role.guard';
+import { canActivateRole, homeForRole, safeReturnUrl } from './core/role.guard';
 import { closesAtLabel, voteStatusOf } from './core/api/votes-api.service';
-import { arrearsSummary, bucketCls } from './pages/admin/admin-arrears.component';
+import {
+  arrearsSummary,
+  bucketCls,
+} from './pages/admin/admin-arrears.component';
 import { buildCreateVoteDto } from './pages/admin/admin-votes.component';
 import { jobsForTab } from './pages/admin/admin-jobs.component';
 import {
@@ -18,6 +25,9 @@ import {
   parseCerts,
 } from './pages/provider/provider-portal.component';
 import { isMockCheckout } from './pages/balance/balance.component';
+import { ownReports } from './pages/resident/resident-defects.component';
+import { toggleSetId } from './pages/resident/resident-feed.component';
+import { supplierPaymentMethodLabel } from './core/api/payouts-api.service';
 
 describe('homeForRole', () => {
   it('maps ADMIN to /admin', () => {
@@ -26,6 +36,10 @@ describe('homeForRole', () => {
 
   it('maps RESIDENT to /balance', () => {
     expect(homeForRole('RESIDENT')).toBe('/balance');
+  });
+
+  it('maps platform operators to the dedicated platform route', () => {
+    expect(homeForRole('PLATFORM_ADMIN')).toBe('/platform/billing');
   });
 
   it('maps PROVIDER to /provider', () => {
@@ -38,16 +52,27 @@ describe('homeForRole', () => {
   });
 });
 
+describe('safeReturnUrl', () => {
+  it('keeps local paths with query/hash', () => {
+    expect(safeReturnUrl('/balance/statement?year=2026#totals')).toBe(
+      '/balance/statement?year=2026#totals',
+    );
+  });
+
+  it('rejects external and protocol-relative redirects', () => {
+    expect(safeReturnUrl('https://evil.example', '/login')).toBe('/login');
+    expect(safeReturnUrl('//evil.example/path', '/login')).toBe('/login');
+    expect(safeReturnUrl('/\\evil.example', '/login')).toBe('/login');
+  });
+});
+
 describe('canActivateRole', () => {
   const route = {} as ActivatedRouteSnapshot;
   const state = { url: '/admin' } as RouterStateSnapshot;
 
-  function run(
-    guard: ReturnType<typeof canActivateRole>,
-  ): boolean | UrlTree {
-    return TestBed.runInInjectionContext(() =>
-      guard(route, state),
-    ) as boolean | UrlTree;
+  function run(guard: ReturnType<typeof canActivateRole>): boolean | UrlTree {
+    return TestBed.runInInjectionContext(() => guard(route, state)) as
+      boolean | UrlTree;
   }
 
   beforeEach(async () => {
@@ -63,7 +88,7 @@ describe('canActivateRole', () => {
   it('redirects unauthenticated users to /login', () => {
     const result = run(canActivateRole('ADMIN'));
     expect(result instanceof UrlTree).toBe(true);
-    expect((result as UrlTree).toString()).toBe('/login');
+    expect((result as UrlTree).toString()).toBe('/login?returnUrl=%2Fadmin');
   });
 
   it('redirects users with the wrong role to their home', async () => {
@@ -143,9 +168,15 @@ describe('vote helpers', () => {
 
   it('closesAtLabel counts up after close and down before it', () => {
     const closesAt = '2026-06-10T00:00:00Z';
-    const beforeLabel = closesAtLabel(closesAt, new Date(toTime(closesAt) - 36 * 60 * 60 * 1000));
+    const beforeLabel = closesAtLabel(
+      closesAt,
+      new Date(toTime(closesAt) - 36 * 60 * 60 * 1000),
+    );
     expect(beforeLabel).toContain('Λήγει σε');
-    const afterLabel = closesAtLabel(closesAt, new Date(toTime(closesAt) + 2 * 24 * 60 * 60 * 1000));
+    const afterLabel = closesAtLabel(
+      closesAt,
+      new Date(toTime(closesAt) + 2 * 24 * 60 * 60 * 1000),
+    );
     expect(afterLabel).toContain('Έκλεισε πριν από');
   });
 });
@@ -254,7 +285,7 @@ describe('provider helpers', () => {
       'SUBMITTED',
     );
     expect(findOwnActiveBid({ bids: [] }, 'p1')).toBeNull();
-    expect(findOwnActiveBid({ bids: [...bids] as never[] }, null)).toBeNull();
+    expect(findOwnActiveBid({ bids: [...bids] as never[] }, 'p3')).toBeNull();
   });
 
   it('parseCerts splits on commas and drops empties', () => {
@@ -266,10 +297,48 @@ describe('provider helpers', () => {
   });
 });
 
+describe('feed draft state', () => {
+  it('adds and removes ids without mutating another item state', () => {
+    const first = toggleSetId(new Set<string>(), 'a', true);
+    const second = toggleSetId(first, 'b', true);
+    expect([...second]).toEqual(['a', 'b']);
+    expect([...toggleSetId(second, 'a', false)]).toEqual(['b']);
+    expect([...first]).toEqual(['a']);
+  });
+});
+
+describe('ownReports', () => {
+  it('keeps a converted report identified by reporter or remembered id', () => {
+    const jobs = [
+      { id: 'j1', source: 'ADMIN_RFP', reportedById: 'resident-1' },
+      { id: 'j2', source: 'ADMIN_RFP' },
+      { id: 'j3', source: 'ADMIN_RFP' },
+      { id: 'j4', source: 'RESIDENT_REPORT' },
+    ] as never[];
+    expect(
+      ownReports(jobs, 'resident-1', new Set(['j3'])).map((job) => job.id),
+    ).toEqual(['j1', 'j3', 'j4']);
+  });
+});
+
+describe('supplierPaymentMethodLabel', () => {
+  it('does not guess that an unknown payout method is a card', () => {
+    expect(supplierPaymentMethodLabel('BANK')).toBe('Τράπεζα');
+    expect(supplierPaymentMethodLabel('CARD')).toBe('Κάρτα');
+    expect(
+      supplierPaymentMethodLabel(
+        'CRYPTO' as 'BANK' | 'CASH' | 'CHECK' | 'CARD',
+      ),
+    ).toBe('CRYPTO');
+  });
+});
+
 describe('isMockCheckout', () => {
   it('detects sandbox order URLs only', () => {
     expect(isMockCheckout('/mockOrder/checkout?code=123')).toBe(true);
-    expect(isMockCheckout('https://demo.vivapayments.com/web/checkout')).toBe(false);
+    expect(isMockCheckout('https://demo.vivapayments.com/web/checkout')).toBe(
+      false,
+    );
   });
 });
 

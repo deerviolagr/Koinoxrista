@@ -16,8 +16,9 @@ describe('quorumOf', () => {
     expect(result.presentPermille).toBe(499);
   });
 
-  it('requires strictly more than half for MILLIMES_MAJORITY', () => {
-    expect(quorumOf(1000, 500, 'MILLIMES_MAJORITY').quorumMet).toBe(false);
+  it('uses the same inclusive 50% boundary for MILLIMES_MAJORITY', () => {
+    expect(quorumOf(1000, 500, 'MILLIMES_MAJORITY').quorumMet).toBe(true);
+    expect(quorumOf(1000, 499, 'MILLIMES_MAJORITY').quorumMet).toBe(false);
     expect(quorumOf(1000, 501, 'MILLIMES_MAJORITY').quorumMet).toBe(true);
   });
 

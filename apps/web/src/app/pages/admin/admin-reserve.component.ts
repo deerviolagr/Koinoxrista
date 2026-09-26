@@ -6,6 +6,7 @@ import {
   inject,
   signal,
 } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { EMPTY, catchError, forkJoin } from 'rxjs';
 import type {
@@ -17,13 +18,14 @@ import {
   levyStrategyLabel,
   levyStatusLabel,
 } from '@org/shared';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 import { BuildingsApiService } from '../../core/api/buildings-api.service';
 import {
   ReserveApiService,
 } from '../../core/api/reserve-api.service';
 import { UnitsApiService, UnitWithOwners } from '../../core/api/units-api.service';
 import { ToastService } from '../../ui/toast.service';
-import { eurosToCents, formatEuros } from '../../ui/format';
+import { eurosToCents } from '../../ui/format';
 
 @Component({
   selector: 'app-admin-reserve',
@@ -36,7 +38,10 @@ import { eurosToCents, formatEuros } from '../../ui/format';
       <div class="card text-sm text-slate-500">Φόρτωση…</div>
     } @else if (loadError()) {
       <div class="card border-red-200 bg-red-50 text-sm text-red-700">
-        Αποτυχία φόρτωσης αποθεματικού. Δοκιμάστε ξανά.
+        <p>Αποτυχία φόρτωσης αποθεματικού.</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="loadBuilding()">
+          Δοκιμή ξανά
+        </button>
       </div>
     } @else {
       <!-- KPI cards -->
@@ -94,7 +99,7 @@ import { eurosToCents, formatEuros } from '../../ui/format';
             <h2 class="card-title">Στόχος αποθεματικού</h2>
             <form [formGroup]="targetForm" (ngSubmit)="updateTarget()" class="flex flex-col gap-3">
               <div>
-                <label class="label" for="targetAmount">Στόχος (€)</label>
+                <label class="label" for="targetAmount">Στόχος ({{ currency() }})</label>
                 <input id="targetAmount" type="number" min="0" step="0.01" class="input" formControlName="targetAmount" />
                 @if (targetSubmitted() && targetForm.controls.targetAmount.invalid) {
                   <p class="field-error">Δώστε έγκυρο ποσό ≥0.</p>
@@ -109,7 +114,7 @@ import { eurosToCents, formatEuros } from '../../ui/format';
             <h2 class="card-title">Συνεισφορά</h2>
             <form [formGroup]="contribForm" (ngSubmit)="contribute()" class="flex flex-col gap-3">
               <div>
-                <label class="label" for="contribAmount">Ποσό (€) *</label>
+                <label class="label" for="contribAmount">Ποσό ({{ currency() }}) *</label>
                 <input id="contribAmount" type="number" min="0.01" step="0.01" class="input" formControlName="amount" />
                 @if (contribSubmitted() && contribForm.controls.amount.invalid) {
                   <p class="field-error">Δώστε έγκυρο ποσό.</p>
@@ -136,7 +141,7 @@ import { eurosToCents, formatEuros } from '../../ui/format';
             <h2 class="card-title">Ανάληψη</h2>
             <form [formGroup]="drawdownForm" (ngSubmit)="drawdown()" class="flex flex-col gap-3">
               <div>
-                <label class="label" for="drawAmount">Ποσό (€) *</label>
+                <label class="label" for="drawAmount">Ποσό ({{ currency() }}) *</label>
                 <input id="drawAmount" type="number" min="0.01" step="0.01" class="input" formControlName="amount" />
                 @if (drawSubmitted() && drawdownForm.controls.amount.invalid) {
                   <p class="field-error">Δώστε έγκυρο ποσό.</p>
@@ -176,7 +181,7 @@ import { eurosToCents, formatEuros } from '../../ui/format';
                 </div>
                 <div class="grid grid-cols-2 gap-3">
                   <div>
-                    <label class="label" for="levyTotal">Σύνολο (€) *</label>
+                    <label class="label" for="levyTotal">Σύνολο ({{ currency() }}) *</label>
                     <input id="levyTotal" type="number" min="0.01" step="0.01" class="input" formControlName="total" />
                     @if (levySubmitted() && levyForm.controls.total.invalid) {
                       <p class="field-error">Δώστε έγκυρο ποσό.</p>
@@ -298,7 +303,14 @@ import { eurosToCents, formatEuros } from '../../ui/format';
           </div>
 
           <!-- Levy detail + share table -->
-          @if (selectedLevy(); as detail) {
+          @if (detailLoading()) {
+            <div class="card mt-4 text-sm text-slate-500">Φόρτωση λεπτομερειών…</div>
+          } @else if (detailError()) {
+            <div class="card mt-4 border border-red-200 bg-red-50 text-sm text-red-700">
+              <p>Αποτυχία φόρτωσης λεπτομερειών.</p>
+              <button type="button" class="btn btn-secondary mt-2" (click)="retrySelectedLevy()">Δοκιμή ξανά</button>
+            </div>
+          } @else if (selectedLevy(); as detail) {
             <div class="card mt-4">
               <div class="mb-3 flex items-center justify-between">
                 <h3 class="card-title mb-0">Λεπτομέρειες: {{ detail.title }}</h3>
@@ -355,10 +367,12 @@ export class AdminReservePage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
   private readonly reserveApi = inject(ReserveApiService);
   private readonly unitsApi = inject(UnitsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
   protected readonly strategyLabel = levyStrategyLabel;
   protected readonly statusLabel = levyStatusLabel;
 
@@ -374,6 +388,8 @@ export class AdminReservePage implements OnInit {
   protected readonly units = signal<UnitWithOwners[]>([]);
   protected readonly selectedLevyId = signal<string | null>(null);
   protected readonly selectedLevy = signal<ExtraordinaryLevyDto | null>(null);
+  protected readonly detailLoading = signal(false);
+  protected readonly detailError = signal(false);
 
   protected readonly loading = signal(true);
   protected readonly loadError = signal(false);
@@ -392,7 +408,7 @@ export class AdminReservePage implements OnInit {
   protected readonly levyModalOpen = signal(false);
 
   private buildingId: string | null = null;
-  private customWeights = new Map<string, number>();
+  private readonly customWeights = signal<Map<string, number>>(new Map());
 
   protected readonly targetForm = this.fb.nonNullable.group({
     targetAmount: this.fb.nonNullable.control<number | null>(null, {
@@ -424,6 +440,15 @@ export class AdminReservePage implements OnInit {
       'MILIMES' | 'UNITS' | 'CUSTOM' | 'SQUARE_METERS' | 'SHARE_FRACTION'
     >('MILIMES'),
   });
+
+  private readonly levyTotalValue = toSignal(
+    this.levyForm.controls.total.valueChanges,
+    { initialValue: this.levyForm.controls.total.value },
+  );
+  private readonly levyStrategyValue = toSignal(
+    this.levyForm.controls.strategy.valueChanges,
+    { initialValue: this.levyForm.controls.strategy.value },
+  );
 
   protected readonly coveragePercent = computed(() => {
     const f = this.fund();
@@ -459,8 +484,8 @@ export class AdminReservePage implements OnInit {
 
   // preview shares: local largest-remainder split for UX
   protected readonly previewShares = computed(() => {
-    const total = eurosToCents(this.levyForm.controls.total.value ?? NaN);
-    const strategy = this.levyForm.controls.strategy.value;
+    const total = eurosToCents(this.levyTotalValue() ?? NaN);
+    const strategy = this.levyStrategyValue();
     const units = this.units();
     if (!Number.isFinite(total) || total <= 0 || units.length === 0) return [];
     let weights: Array<{ id: string; weight: number; label: string }> = [];
@@ -483,7 +508,7 @@ export class AdminReservePage implements OnInit {
     } else {
       weights = units.map((u) => ({
         id: u.id,
-        weight: this.customWeights.get(u.id) ?? 0,
+        weight: this.customWeights().get(u.id) ?? 0,
         label: u.label,
       }));
       if (weights.some((w) => w.weight <= 0)) return [];
@@ -516,14 +541,33 @@ export class AdminReservePage implements OnInit {
   );
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    if (this.loading() && this.buildingId) return;
+    this.loading.set(true);
+    this.loadError.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.unitsApi
           .list(building.id)
-          .pipe(catchError(() => EMPTY))
+          .pipe(
+            catchError(() => {
+              this.loadError.set(true);
+              this.loading.set(false);
+              return EMPTY;
+            }),
+          )
           .subscribe((units) => this.units.set(units));
         this.reloadAll();
       });
@@ -557,19 +601,18 @@ export class AdminReservePage implements OnInit {
   }
 
   protected customWeightFor(unitId: string): number | '' {
-    const v = this.customWeights.get(unitId);
+    const v = this.customWeights().get(unitId);
     return v ?? '';
   }
 
   protected setCustomWeight(unitId: string, raw: string): void {
     const n = Number(raw);
-    if (!Number.isFinite(n) || n <= 0) {
-      this.customWeights.delete(unitId);
-    } else {
-      this.customWeights.set(unitId, Math.round(n));
-    }
-    // trigger preview recompute by touching form
-    this.levyForm.controls.strategy.updateValueAndValidity({ emitEvent: true });
+    this.customWeights.update((current) => {
+      const next = new Map(current);
+      if (!Number.isFinite(n) || n <= 0) next.delete(unitId);
+      else next.set(unitId, Math.round(n));
+      return next;
+    });
   }
 
   protected updateTarget(): void {
@@ -665,7 +708,7 @@ export class AdminReservePage implements OnInit {
     if (strategy === 'CUSTOM') {
       customWeights = this.units().map((u) => ({
         unitId: u.id,
-        weight: this.customWeights.get(u.id) ?? 0,
+        weight: this.customWeights().get(u.id) ?? 0,
       }));
       if (customWeights.some((w) => w.weight <= 0)) {
         this.toast.error('Δώστε βάρος >0 για κάθε διαμέρισμα.');
@@ -685,7 +728,7 @@ export class AdminReservePage implements OnInit {
         next: () => {
           this.levySubmitted.set(false);
           this.levyForm.reset({ title: '', total: null, strategy: 'MILIMES' });
-          this.customWeights.clear();
+          this.customWeights.set(new Map());
           this.levyModalOpen.set(false);
           this.savingLevy.set(false);
           this.toast.success('Η έκτακτη εισφορά δημιουργήθηκε (προσχέδιο).');
@@ -702,10 +745,10 @@ export class AdminReservePage implements OnInit {
   protected selectLevy(levy: ExtraordinaryLevyDto): void {
     if (!this.buildingId) return;
     this.selectedLevyId.set(levy.id);
-    this.reserveApi
-      .getLevy(this.buildingId, levy.id)
-      .pipe(catchError(() => EMPTY))
-      .subscribe((detail) => {
+    this.detailLoading.set(true);
+    this.detailError.set(false);
+    this.reserveApi.getLevy(this.buildingId, levy.id).subscribe({
+      next: (detail) => {
         // enrich shares with unitLabel if missing
         if (detail.shares) {
           for (const s of detail.shares) {
@@ -715,7 +758,20 @@ export class AdminReservePage implements OnInit {
           }
         }
         this.selectedLevy.set(detail);
-      });
+        this.detailLoading.set(false);
+      },
+      error: () => {
+        this.detailLoading.set(false);
+        this.detailError.set(true);
+        this.toast.error('Η φόρτωση λεπτομερειών απέτυχε.');
+      },
+    });
+  }
+
+  protected retrySelectedLevy(): void {
+    const id = this.selectedLevyId();
+    const levy = this.levies().find((item) => item.id === id);
+    if (levy) this.selectLevy(levy);
   }
 
   protected issueLevy(levy: ExtraordinaryLevyDto): void {

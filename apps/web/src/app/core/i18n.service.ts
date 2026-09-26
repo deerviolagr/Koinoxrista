@@ -1,10 +1,18 @@
-import { Injectable, signal, inject } from '@angular/core';
+import { DOCUMENT } from '@angular/common';
+import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 
-export const SUPPORTED_LANGUAGES = ['el', 'en', 'zh', 'pt', 'ja', 'es'] as const;
+export const SUPPORTED_LANGUAGES = [
+  'el',
+  'en',
+  'zh',
+  'pt',
+  'ja',
+  'es',
+] as const;
 export type AppLocale = (typeof SUPPORTED_LANGUAGES)[number];
 
-export const DEFAULT_LOCALE: AppLocale = 'en';
+export const DEFAULT_LOCALE: AppLocale = 'el';
 
 export const LOCALE_TO_INTL: Record<AppLocale, string> = {
   el: 'el-GR',
@@ -30,6 +38,7 @@ const EMPTY_DICT: TranslationDict = {};
 @Injectable({ providedIn: 'root' })
 export class I18nService {
   private readonly http = inject(HttpClient);
+  private readonly document = inject(DOCUMENT);
 
   private readonly locale = signal<AppLocale>(this.resolveInitialLocale());
   private readonly dict = signal<TranslationDict>(EMPTY_DICT);
@@ -39,6 +48,7 @@ export class I18nService {
   readonly currentLocale = this.locale.asReadonly();
 
   constructor() {
+    this.syncDocumentLanguage();
     // Load the active locale dict plus the English baseline for fallback.
     void this.loadDict(this.locale());
     void this.loadEnDict();
@@ -62,6 +72,7 @@ export class I18nService {
     }
     const next = locale as AppLocale;
     this.locale.set(next);
+    this.syncDocumentLanguage();
     try {
       localStorage.setItem('locale', next);
     } catch {
@@ -90,6 +101,10 @@ export class I18nService {
     } catch {
       this.enDict.set(EMPTY_DICT);
     }
+  }
+
+  private syncDocumentLanguage(): void {
+    this.document.documentElement.lang = this.locale();
   }
 
   private resolveInitialLocale(): AppLocale {

@@ -123,6 +123,19 @@ describe('parseBankCsv', () => {
     ]);
   });
 
+  it('preserves an explicit currency column for reconciliation', () => {
+    expect(
+      parseBankCsv('2026-08-09;10,00;receipt-9;EUR'),
+    ).toEqual([
+      {
+        dateIso: '2026-08-09',
+        amountCents: 1_000,
+        reference: 'receipt-9',
+        currency: 'EUR',
+      },
+    ]);
+  });
+
   it('handles CRLF line endings and currency symbols', () => {
     const csv = '2026-08-08;€ 1.234,56;EUR\r\n2026-08-09;EUR 9,9;B\n';
     expect(parseBankCsv(csv)).toEqual([

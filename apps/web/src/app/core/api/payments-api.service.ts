@@ -9,6 +9,51 @@ import {
 } from '@org/shared';
 import { environment } from '../../../environments/environment';
 
+export type CheckoutProvider =
+  'viva' | 'stripe' | 'stripejp' | 'mercadopago' | 'gmo' | (string & {});
+
+export interface CreateCheckoutResponse extends CreatePaymentOrderResponse {
+  /** PSP selected by the building; absent only on older API builds. */
+  provider?: CheckoutProvider;
+}
+
+export function checkoutProviderLabel(
+  provider: string | null | undefined,
+): string {
+  switch (provider?.toLowerCase()) {
+    case 'viva':
+      return 'Viva';
+    case 'stripe':
+      return 'Stripe';
+    case 'stripejp':
+      return 'Stripe Japan';
+    case 'mercadopago':
+      return 'Mercado Pago';
+    case 'gmo':
+      return 'GMO Payment Gateway';
+    default:
+      return provider || 'Σύστημα πληρωμής';
+  }
+}
+
+export function checkoutActionLabel(
+  provider: string | null | undefined,
+): string {
+  switch (provider?.toLowerCase()) {
+    case 'viva':
+      return 'Συνέχεια στο Viva';
+    case 'stripe':
+    case 'stripejp':
+      return 'Πληρωμή με Stripe';
+    case 'mercadopago':
+      return 'Πληρωμή με Mercado Pago';
+    case 'gmo':
+      return 'Πληρωμή με GMO';
+    default:
+      return 'Άνοιγμα ασφαλούς πληρωμής';
+  }
+}
+
 /** A recorded payment on an invoice (joined by the API in invoice detail). */
 export interface InvoicePaymentView {
   id: string;
@@ -31,8 +76,8 @@ export class PaymentsApiService {
   private readonly base = `${environment.apiUrl}/invoices`;
 
   /** Creates a PSP checkout order for the (remaining) invoice amount. */
-  pay(invoiceId: string): Observable<CreatePaymentOrderResponse> {
-    return this.http.post<CreatePaymentOrderResponse>(
+  pay(invoiceId: string): Observable<CreateCheckoutResponse> {
+    return this.http.post<CreateCheckoutResponse>(
       `${this.base}/${invoiceId}/pay`,
       {},
     );
@@ -42,8 +87,11 @@ export class PaymentsApiService {
     return this.http.get<InvoiceDetailView>(`${this.base}/${invoiceId}`);
   }
 
-  receiptUrl(invoiceId: string): string {
-    return `${this.base}/${invoiceId}/receipt.html`;
+  /** Authenticated receipt download; a plain href would omit the bearer token. */
+  receipt(invoiceId: string): Observable<Blob> {
+    return this.http.get(`${this.base}/${invoiceId}/receipt.html`, {
+      responseType: 'blob' as const,
+    });
   }
 
   /** Human label for a payment method code (CARD / IRIS / PIX / …). */

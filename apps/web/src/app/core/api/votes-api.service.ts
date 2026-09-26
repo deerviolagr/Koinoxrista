@@ -15,15 +15,23 @@ import { environment } from '../../../environments/environment';
 export type VoteStatus = 'SCHEDULED' | 'OPEN' | 'CLOSED';
 
 /** Vote row as returned by the building votes list. */
-export interface VoteListItem extends Vote {
+export interface VoteListItem extends Omit<Vote, 'description'> {
+  description: string | null;
   status: VoteStatus;
   ballotsCount: number;
 }
 
-export interface VoteDetail {
-  vote: VoteListItem;
+/** GET /votes/:id returns the vote fields at the top level. */
+export interface VoteDetail extends VoteListItem {
   myBallots: BallotView[];
   tally: VoteTally;
+}
+
+export interface VoteBallotRow {
+  id: string;
+  unitId: string;
+  unitLabel: string;
+  choice: BallotView['choice'];
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -52,7 +60,10 @@ export function thresholdLabel(thresholdType: VoteThresholdType): string {
 }
 
 /** Badge style for a vote status (cls + label). */
-export function voteStatusBadge(status: VoteStatus): { cls: string; label: string } {
+export function voteStatusBadge(status: VoteStatus): {
+  cls: string;
+  label: string;
+} {
   switch (status) {
     case 'OPEN':
       return { cls: 'bg-blue-100 text-blue-800', label: 'Ανοιχτή' };
@@ -64,7 +75,10 @@ export function voteStatusBadge(status: VoteStatus): { cls: string; label: strin
 }
 
 /** Countdown-ish text for closesAt relative to `now` (pure). */
-export function closesAtLabel(closesAt: string, now: Date = new Date()): string {
+export function closesAtLabel(
+  closesAt: string,
+  now: Date = new Date(),
+): string {
   const diff = Date.parse(closesAt) - now.getTime();
   const days = Math.floor(Math.abs(diff) / DAY_MS);
   const hours = Math.floor((Math.abs(diff) % DAY_MS) / (60 * 60 * 1000));
@@ -87,27 +101,37 @@ export class VotesApiService {
   private readonly base = `${environment.apiUrl}`;
 
   list(buildingId: string): Observable<VoteListItem[]> {
-    return this.http.get<VoteListItem[]>(`${this.base}/buildings/${buildingId}/votes`);
+    return this.http.get<VoteListItem[]>(
+      `${this.base}/buildings/${buildingId}/votes`,
+    );
   }
 
   create(buildingId: string, dto: CreateVoteDto): Observable<Vote> {
-    return this.http.post<Vote>(`${this.base}/buildings/${buildingId}/votes`, dto);
+    return this.http.post<Vote>(
+      `${this.base}/buildings/${buildingId}/votes`,
+      dto,
+    );
   }
 
   detail(voteId: string): Observable<VoteDetail> {
     return this.http.get<VoteDetail>(`${this.base}/votes/${voteId}`);
   }
 
-  castBallot(voteId: string, dto: CastBallotDto): Observable<BallotView> {
-    return this.http.post<BallotView>(`${this.base}/votes/${voteId}/ballots`, dto);
+  castBallot(voteId: string, dto: CastBallotDto): Observable<BallotView[]> {
+    return this.http.post<BallotView[]>(
+      `${this.base}/votes/${voteId}/ballots`,
+      dto,
+    );
   }
 
-  close(voteId: string): Observable<VoteListItem> {
-    return this.http.post<VoteListItem>(`${this.base}/votes/${voteId}/close`, {});
+  close(voteId: string): Observable<VoteDetail> {
+    return this.http.post<VoteDetail>(`${this.base}/votes/${voteId}/close`, {});
   }
 
   /** ADMIN only: every ballot cast on the vote. */
-  ballots(voteId: string): Observable<BallotView[]> {
-    return this.http.get<BallotView[]>(`${this.base}/votes/${voteId}/ballots`);
+  ballots(voteId: string): Observable<VoteBallotRow[]> {
+    return this.http.get<VoteBallotRow[]>(
+      `${this.base}/votes/${voteId}/ballots`,
+    );
   }
 }

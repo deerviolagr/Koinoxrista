@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { Prisma, User } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -6,10 +10,13 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
-  buildOtpauthUri,
-  generateSecret,
-  verifyTotp,
-} from './totp';
+  consumeLoginTicketLocally,
+  hashLoginTicket,
+  resetLoginTicketAttempts,
+  signLoginTicket,
+  TWO_FACTOR_TICKET_TTL_MS,
+} from './login-ticket';
+import { buildOtpauthUri, generateSecret, verifyTotp } from './totp';
 
 const RECOVERY_CODE_COUNT = 10;
 const RECOVERY_CODE_LENGTH = 10; // chars from the base32 alphabet
@@ -42,6 +49,33 @@ interface RecoveryCodeDelegate {
     data: { usedAt: Date };
   }): Promise<{ count: number }>;
   deleteMany(args: { where: { userId: string } }): Promise<{ count: number }>;
+}
+
+/**
+ * EmailVerification is already a durable, single-use token table. Reusing it
+ * for a namespaced 2FA ticket avoids adding a schema/model solely for a five
+ * minute challenge. Older generated clients/mocks may not expose the delegate;
+ * the service then uses the process-local fallback in login-ticket.ts.
+ */
+interface LoginTicketDelegate {
+  create(args: {
+    data: {
+      userId: string;
+      buildingId: null;
+      tokenHash: string;
+      expiresAt: Date;
+      consumedAt: null;
+    };
+  }): Promise<unknown>;
+  updateMany(args: {
+    where: {
+      userId: string;
+      tokenHash: string;
+      consumedAt: null;
+      expiresAt: { gt: Date };
+    };
+    data: { consumedAt: Date };
+  }): Promise<{ count: number }>;
 }
 
 export function twoFactorFields(user: User): TwoFactorUserFields {
@@ -81,6 +115,57 @@ export class TwoFactorService {
     ).twoFactorRecoveryCode;
   }
 
+  private get loginTickets(): LoginTicketDelegate | null {
+    const delegate = (
+      this.prisma as unknown as {
+        emailVerification?: LoginTicketDelegate;
+      }
+    ).emailVerification;
+    return delegate ?? null;
+  }
+
+  /**
+   * Issue a password-step ticket and persist only its namespaced hash. A
+   * storage failure is intentionally propagated: issuing an untracked ticket
+   * would make the one-time guarantee fail open.
+   */
+  async issueLoginTicket(userId: string): Promise<string> {
+    const ticket = signLoginTicket(userId);
+    const delegate = this.loginTickets;
+    if (!delegate) return ticket;
+    await delegate.create({
+      data: {
+        userId,
+        buildingId: null,
+        tokenHash: hashLoginTicket(ticket),
+        expiresAt: new Date(Date.now() + TWO_FACTOR_TICKET_TTL_MS),
+        consumedAt: null,
+      },
+    });
+    return ticket;
+  }
+
+  /** Atomically redeem a ticket; a replay or race loses the updateMany race. */
+  async consumeLoginTicket(ticket: string, userId: string): Promise<boolean> {
+    const delegate = this.loginTickets;
+    if (!delegate) return consumeLoginTicketLocally(ticket);
+    const result = await delegate.updateMany({
+      where: {
+        userId,
+        tokenHash: hashLoginTicket(ticket),
+        consumedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      data: { consumedAt: new Date() },
+    });
+    return result.count === 1;
+  }
+
+  /** Clear the per-ticket attempt counter after a successful challenge. */
+  resetLoginTicketAttempts(ticket: string): void {
+    resetLoginTicketAttempts(ticket);
+  }
+
   /** Cheap status probe used by GET /auth/me. */
   async isEnabled(userId: string): Promise<boolean> {
     const row = await this.prisma.user.findUnique({
@@ -104,7 +189,11 @@ export class TwoFactorService {
    * Verifies a first live token against the pending secret, enables 2FA and
    * (re)issues single-use recovery codes — returned in plaintext ONCE.
    */
-  async enable(userId: string, secret: string, token: string): Promise<string[]> {
+  async enable(
+    userId: string,
+    secret: string,
+    token: string,
+  ): Promise<string[]> {
     if (!/^[A-Za-z2-7]+=*$/.test(secret)) {
       throw new BadRequestException('Invalid 2FA secret');
     }

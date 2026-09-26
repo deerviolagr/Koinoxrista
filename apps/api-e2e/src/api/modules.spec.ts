@@ -24,8 +24,8 @@ describe('new feature modules', () => {
   });
 
   describe('maintenance', () => {
-    let assetId: string;
-    let scheduleId: string;
+    let assetId: string | undefined;
+    let scheduleId: string | undefined;
 
     it('creates an asset and a maintenance schedule', async () => {
       const asset = await axios.post(
@@ -75,15 +75,19 @@ describe('new feature modules', () => {
     });
 
     afterAll(async () => {
-      await prisma.maintenanceSchedule.deleteMany({ where: { id: scheduleId } });
-      await prisma.buildingAsset.deleteMany({ where: { id: assetId } });
+      if (scheduleId) {
+        await prisma.maintenanceSchedule.deleteMany({ where: { id: scheduleId } });
+      }
+      if (assetId) {
+        await prisma.buildingAsset.deleteMany({ where: { id: assetId } });
+      }
     });
   });
 
   describe('reserve fund', () => {
-    let fundId: string;
-    let contributionId: string;
-    let levyId: string;
+    let fundId: string | undefined;
+    let contributionId: string | undefined;
+    let levyId: string | undefined;
 
     it('creates the fund and accepts a contribution', async () => {
       // Fund auto-creates on first access; PATCH target sets the goal.
@@ -132,17 +136,23 @@ describe('new feature modules', () => {
     });
 
     afterAll(async () => {
-      await prisma.levyShare.deleteMany({ where: { levyId } });
-      await prisma.extraordinaryLevy.deleteMany({ where: { id: levyId } });
-      await prisma.reserveContribution.deleteMany({ where: { id: contributionId } });
-      await prisma.reserveDrawdown.deleteMany({ where: { fundId } });
-      await prisma.reserveFund.deleteMany({ where: { id: fundId } });
+      if (levyId) {
+        await prisma.levyShare.deleteMany({ where: { levyId } });
+        await prisma.extraordinaryLevy.deleteMany({ where: { id: levyId } });
+      }
+      if (contributionId) {
+        await prisma.reserveContribution.deleteMany({ where: { id: contributionId } });
+      }
+      if (fundId) {
+        await prisma.reserveDrawdown.deleteMany({ where: { fundId } });
+        await prisma.reserveFund.deleteMany({ where: { id: fundId } });
+      }
     });
   });
 
   describe('treasury', () => {
-    let accountId: string;
-    let entryId: string;
+    let accountId: string | undefined;
+    let entryId: string | undefined;
 
     it('creates an account and posts an entry', async () => {
       const account = await axios.post(
@@ -171,13 +181,17 @@ describe('new feature modules', () => {
     });
 
     afterAll(async () => {
-      await prisma.treasuryEntry.deleteMany({ where: { id: entryId } });
-      await prisma.treasuryAccount.deleteMany({ where: { id: accountId } });
+      if (entryId) {
+        await prisma.treasuryEntry.deleteMany({ where: { id: entryId } });
+      }
+      if (accountId) {
+        await prisma.treasuryAccount.deleteMany({ where: { id: accountId } });
+      }
     });
   });
 
   describe('supplier invoices', () => {
-    let invoiceId: string;
+    let invoiceId: string | undefined;
 
     it('creates a manual supplier invoice and lists it', async () => {
       const invoice = await axios.post(
@@ -213,16 +227,18 @@ describe('new feature modules', () => {
     });
 
     afterAll(async () => {
-      await prisma.supplierInvoice.deleteMany({ where: { id: invoiceId } });
+      if (invoiceId) {
+        await prisma.supplierInvoice.deleteMany({ where: { id: invoiceId } });
+      }
     });
   });
 
   describe('legal cases', () => {
     const period = uniquePeriod();
-    let invoiceId: string;
-    let categoryId: string;
-    let expenseId: string;
-    let caseId: string;
+    let invoiceId: string | undefined;
+    let categoryId: string | undefined;
+    let expenseId: string | undefined;
+    let caseId: string | undefined;
 
     it('creates a legal case from an unpaid invoice', async () => {
       const unitId = building.units[0].id;
@@ -274,14 +290,22 @@ describe('new feature modules', () => {
     });
 
     afterAll(async () => {
-      await prisma.legalEvent.deleteMany({ where: { caseId } });
-      await prisma.legalCase.deleteMany({ where: { id: caseId } });
-      await prisma.payment.deleteMany({ where: { invoiceId } });
-      await prisma.paymentOrder.deleteMany({ where: { invoiceId } });
-      await prisma.invoice.deleteMany({ where: { id: invoiceId } });
-      await prisma.share.deleteMany({ where: { expenseId } });
-      await prisma.expense.delete({ where: { id: expenseId } });
-      await prisma.expenseCategory.delete({ where: { id: categoryId } });
+      if (caseId) {
+        await prisma.legalEvent.deleteMany({ where: { caseId } });
+        await prisma.legalCase.deleteMany({ where: { id: caseId } });
+      }
+      if (invoiceId) {
+        await prisma.payment.deleteMany({ where: { invoiceId } });
+        await prisma.paymentOrder.deleteMany({ where: { invoiceId } });
+        await prisma.invoice.deleteMany({ where: { id: invoiceId } });
+      }
+      if (expenseId) {
+        await prisma.share.deleteMany({ where: { expenseId } });
+        await prisma.expense.deleteMany({ where: { id: expenseId } });
+      }
+      if (categoryId) {
+        await prisma.expenseCategory.deleteMany({ where: { id: categoryId } });
+      }
     });
   });
 

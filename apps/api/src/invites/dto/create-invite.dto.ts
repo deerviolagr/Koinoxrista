@@ -1,20 +1,22 @@
 import {
   IsEmail,
-  IsEnum,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
   Max,
   Min,
 } from 'class-validator';
-import { Role } from '@prisma/client';
+import { INVITABLE_ROLES } from '../roles';
 
 export class CreateInviteDto {
   @IsEmail()
   email!: string;
 
-  @IsEnum(Role)
-  role!: Role;
+  @IsIn(INVITABLE_ROLES, {
+    message: 'role cannot be invited',
+  })
+  role!: (typeof INVITABLE_ROLES)[number];
 
   @IsOptional()
   @IsString()

@@ -8,7 +8,7 @@ import { InvoicesApiService } from '../../core/api/invoices-api.service';
 import { UnitsApiService } from '../../core/api/units-api.service';
 import { ToastService } from '../../ui/toast.service';
 import { StatusBadgeComponent } from '../../ui/status-badge.component';
-import { formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 
 @Component({
   selector: 'app-admin-run',
@@ -41,9 +41,12 @@ import { formatEuros } from '../../ui/format';
       </p>
     </div>
 
-    @if (loadError()) {
+    @if (loading()) {
+      <div class="card mb-6 text-sm text-slate-500">Φόρτωση…</div>
+    } @else if (loadError()) {
       <div class="card mb-6 border-red-200 bg-red-50 text-sm text-red-700">
-        Αποτυχία φόρτωσης κοινοχρήστων.
+        <p>Αποτυχία φόρτωσης κοινοχρήστων.</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="loadBuilding()">Δοκιμή ξανά</button>
       </div>
     }
 
@@ -81,12 +84,14 @@ import { formatEuros } from '../../ui/format';
 })
 export class AdminRunPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly unitsApi = inject(UnitsApiService);
   private readonly invoicesApi = inject(InvoicesApiService);
   private readonly toast = inject(ToastService);
 
   protected readonly isValidPeriod = isValidPeriod;
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
 
   protected readonly periodCtrl = new FormControl(formatPeriod(new Date()), {
     nonNullable: true,
@@ -94,6 +99,7 @@ export class AdminRunPage implements OnInit {
 
   protected readonly invoices = signal<Invoice[] | null>(null);
   protected readonly running = signal(false);
+  protected readonly loading = signal(true);
   protected readonly loadError = signal(false);
   protected readonly unitLabels = signal<Record<string, string>>({});
 
@@ -106,14 +112,32 @@ export class AdminRunPage implements OnInit {
   }
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    this.loading.set(true);
+    this.loadError.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.unitsApi
           .list(building.id)
-          .pipe(catchError(() => EMPTY))
+          .pipe(
+            catchError(() => {
+              this.loadError.set(true);
+              this.loading.set(false);
+              return EMPTY;
+            }),
+          )
           .subscribe((units) => {
             const labels: Record<string, string> = {};
             for (const unit of units) labels[unit.id] = unit.label;
@@ -147,15 +171,20 @@ export class AdminRunPage implements OnInit {
 
   private loadInvoices(period: string): void {
     if (!this.buildingId || !isValidPeriod(period)) return;
+    this.loading.set(true);
     this.loadError.set(false);
     this.invoicesApi
       .list(this.buildingId, period)
       .pipe(
         catchError(() => {
           this.loadError.set(true);
+          this.loading.set(false);
           return EMPTY;
         }),
       )
-      .subscribe((invoices) => this.invoices.set(invoices));
+      .subscribe((invoices) => {
+        this.invoices.set(invoices);
+        this.loading.set(false);
+      });
   }
 }

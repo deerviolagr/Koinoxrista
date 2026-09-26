@@ -12,6 +12,7 @@ import { AuditService } from '../audit/audit.service';
 import { assertSameBuilding } from '../common/tenant';
 import { PrismaService } from '../prisma/prisma.service';
 import { LLM_PROVIDER, LlmProvider } from './llm-provider';
+import { redactContextValue, redactPii } from './privacy';
 
 interface SourceChunk {
   type: 'announcement' | 'faq' | 'static';
@@ -106,7 +107,11 @@ export class AssistantService {
     const scored = announcements
       .map((a) => ({
         score: this.score([a.title, a.body].join(' '), terms),
-        chunk: { type: 'announcement' as const, title: a.title, body: a.body },
+        chunk: {
+          type: 'announcement' as const,
+          title: redactContextValue(a.title),
+          body: redactContextValue(a.body),
+        },
       }))
       .filter((entry) => entry.score > 0)
       .sort((a, b) => b.score - a.score)
@@ -125,7 +130,17 @@ export class AssistantService {
       .slice(0, 3)
       .map((entry) => entry.chunk);
 
-    return faqScored.length > 0 ? faqScored : faqChunks.slice(0, 1);
+    const safeFaq = faqChunks.map((chunk) => ({
+      ...chunk,
+      title: redactContextValue(chunk.title),
+      body: redactContextValue(chunk.body),
+    }));
+    const safeScored = faqScored.map((chunk) => ({
+      ...chunk,
+      title: redactContextValue(chunk.title),
+      body: redactContextValue(chunk.body),
+    }));
+    return safeScored.length > 0 ? safeScored : safeFaq.slice(0, 1);
   }
 
   private cachedFaq: SourceChunk[] | null = null;
@@ -180,10 +195,7 @@ export class AssistantService {
   }
 
   private redactPii(text: string): string {
-    return text
-      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]')
-      .replace(/\+?\d[\d\s\-()]{7,}\d/g, '[τηλ]')
-      .slice(0, 1000);
+    return redactPii(text, 1_000);
   }
 
   private terms(question: string): string[] {
@@ -202,8 +214,12 @@ export class AssistantService {
 
   private renderContext(chunks: SourceChunk[]): string {
     return chunks
-      .map((chunk) => `[${chunk.type}] ${chunk.title}\n${chunk.body}`)
-      .join('\n---\n');
+      .map(
+        (chunk) =>
+          `[${chunk.type}] ${redactContextValue(chunk.title)}\n${redactContextValue(chunk.body)}`,
+      )
+      .join('\n---\n')
+      .slice(0, 8_000);
   }
 }
 

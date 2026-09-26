@@ -19,6 +19,7 @@ const sampleInvoice = (): MyDataSubmitInput => ({
   seqNo: 7,
   issueDate: '2026-08-25',
   invoiceType: '2.1',
+  currency: 'EUR',
   paymentMethodCode: '3',
   netAmountCents: 10_000,
   vatAmountCents: 2_400,
@@ -172,6 +173,9 @@ describe('LiveAadeMyDataProvider.submit', () => {
       '<issueDate>2026-08-25</issueDate>',
     );
     expect(decodeURIComponent(String(body))).toContain(
+      '<currency>EUR</currency>',
+    );
+    expect(decodeURIComponent(String(body))).toContain(
       '<invoiceType>2.1</invoiceType>',
     );
     expect(decodeURIComponent(String(body))).toContain('<netValue>100.00</netValue>');
@@ -218,6 +222,7 @@ describe('LiveAadeMyDataProvider.submit', () => {
       series: 'A',
       seqNo: 8,
       paymentMethodCode: '9',
+      currency: 'EUR',
       netAmountCents: 10_000,
       vatAmountCents: 1_300,
     });
@@ -260,6 +265,20 @@ describe('LiveAadeMyDataProvider.submit', () => {
     } finally {
       nowSpy.mockRestore();
     }
+  });
+
+  it('rejects a non-EUR explicit currency before making a submission request', async () => {
+    const http = makeHttp();
+    http.post.mockResolvedValue({
+      data: { access_token: 't', expires_in: 3600 },
+    });
+
+    await expect(
+      makeProvider(http).submit({ ...sampleInvoice(), currency: 'JPY' }),
+    ).rejects.toThrow(/explicit EUR/);
+    expect(
+      http.post.mock.calls.filter(([u]) => u === '/SendInvoiceDocs'),
+    ).toHaveLength(0);
   });
 
   it('marks responses without a uid as rejected without retrying', async () => {

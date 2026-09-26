@@ -21,7 +21,8 @@ import {
 } from '../../core/api/payouts-api.service';
 import { BuildingsApiService } from '../../core/api/buildings-api.service';
 import { ToastService } from '../../ui/toast.service';
-import { eurosToCents, formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
+import { eurosToCents } from '../../ui/format';
 
 @Component({
   selector: 'app-admin-payouts',
@@ -45,7 +46,8 @@ import { eurosToCents, formatEuros } from '../../ui/format';
       <div class="card text-sm text-slate-500">Φόρτωση…</div>
     } @else if (loadError()) {
       <div class="card border-red-200 bg-red-50 text-sm text-red-700">
-        Αποτυχία φόρτωσης πληρωμών. Δοκιμάστε ξανά.
+        <p>Αποτυχία φόρτωσης πληρωμών.</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="retry()">Δοκιμή ξανά</button>
       </div>
     } @else {
       <div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -87,7 +89,7 @@ import { eurosToCents, formatEuros } from '../../ui/format';
           <h2 class="card-title">Νέα πληρωμή</h2>
           <form [formGroup]="form" (ngSubmit)="save()" class="flex flex-col gap-4">
             <div>
-              <label class="label" for="amount">Ποσό (€)</label>
+              <label class="label" for="amount">Ποσό ({{ currency() }})</label>
               <input
                 id="amount"
                 type="number"
@@ -189,12 +191,14 @@ import { eurosToCents, formatEuros } from '../../ui/format';
 })
 export class AdminPayoutsPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly payoutsApi = inject(PayoutsApiService);
   private readonly jobsApi = inject(JobsApiService);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
   protected readonly methodLabel = supplierPaymentMethodLabel;
 
   protected readonly payments = signal<SupplierPaymentDto[]>([]);
@@ -247,12 +251,23 @@ export class AdminPayoutsPage implements OnInit {
   ngOnInit(): void {
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.jobsApi
           .listForBuilding(building.id)
-          .pipe(catchError(() => EMPTY))
+          .pipe(
+            catchError(() => {
+              this.toast.error('Η φόρτωση εργασιών για πληρωμές απέτυχε.');
+              return EMPTY;
+            }),
+          )
           .subscribe((jobs) => this.jobs.set(jobs));
         this.reload();
       });
@@ -275,6 +290,24 @@ export class AdminPayoutsPage implements OnInit {
 
   protected when(payment: SupplierPaymentDto): string {
     return new Date(payment.paidAt).toLocaleDateString('el-GR');
+  }
+
+  protected retry(): void {
+    this.loading.set(true);
+    this.loadError.set(false);
+    this.buildingsApi
+      .mine()
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
+      .subscribe((building) => {
+        this.buildingId = building.id;
+        this.reload();
+      });
   }
 
   protected save(): void {

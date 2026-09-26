@@ -4,8 +4,15 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 
+import {
+  formatMoney,
+  isCurrencyCode,
+  isCurrencySupportedByMarket,
+  isMarketCode,
+  resolveMarket,
+  type CurrencyCode,
+} from '@org/shared';
 import { AuthenticatedUser } from '../auth/auth.types';
 import { assertSameBuilding } from '../common/tenant';
 import { PrismaService } from '../prisma/prisma.service';
@@ -19,35 +26,75 @@ export interface PdfFile {
 
 export const PDF_CONTENT_TYPE = 'application/pdf';
 
+export interface PdfMoneySettings {
+  currency: CurrencyCode;
+  locale: string;
+}
+
+export interface PdfBuildingSettings {
+  market?: string | null;
+  currency?: string | null;
+}
+
 /**
- * Resolves the bundled NotoSansJP font (Feature 5, CJK glyphs) when present.
- * Downloads are documented in apps/api/scripts/fetch-fonts.sh; without the
- * font the PDF falls back to built-in Helvetica (Latin-only).
+ * Resolve presentation settings from the building profile.  A caller may
+ * override the locale for a one-off response, but invalid persisted values
+ * fall back to the market profile rather than silently formatting as yen.
+ */
+export function resolvePdfSettings(
+  building: PdfBuildingSettings | null | undefined,
+  overrides: { locale?: string; currency?: string } = {},
+): PdfMoneySettings {
+  const market = isMarketCode(building?.market) ? building?.market : 'GR';
+  const profile = resolveMarket(market);
+  const overrideCurrency =
+    overrides.currency &&
+    isCurrencyCode(overrides.currency) &&
+    isCurrencySupportedByMarket(market, overrides.currency)
+      ? overrides.currency
+      : undefined;
+  const buildingCurrency =
+    building?.currency &&
+    isCurrencyCode(building.currency) &&
+    isCurrencySupportedByMarket(market, building.currency)
+      ? building.currency
+      : undefined;
+  const currency = overrideCurrency ?? buildingCurrency ?? profile.currency;
+  const locale = overrides.locale?.trim() || profile.locale;
+  return { currency, locale };
+}
+
+/** Format a stored integer minor-unit amount with the PDF's locale/profile. */
+export function formatPdfMoney(
+  minorUnits: number,
+  settings: PdfMoneySettings,
+): string {
+  return formatMoney(minorUnits, settings);
+}
+
+/**
+ * A font is optional.  The service only uses an explicitly configured local
+ * TTF; it does not download or claim a Japanese/CJK font.  PdfKit's built-in
+ * Helvetica remains the safe Latin fallback.
  */
 function resolveFontPath(): string | undefined {
-  const candidates = [
-    path.join(process.cwd(), 'assets', 'fonts', 'NotoSansJP-Regular.ttf'),
-    path.join(process.cwd(), 'assets', 'fonts', 'NotoSansJP', 'NotoSansJP-Regular.ttf'),
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
-  }
+  const configured = process.env.PDF_FONT_PATH?.trim();
+  if (configured && fs.existsSync(configured)) return configured;
   return undefined;
 }
 
 const FONT_PATH = resolveFontPath();
-const FONT = FONT_PATH ? 'NotoSansJP' : 'Helvetica';
+const FONT = FONT_PATH ? 'ConfiguredPdfFont' : 'Helvetica';
 
 /** Renders a pdfkit document into a Buffer (async — pdfkit streams data). */
 async function renderDoc(
   build: (doc: PdfKit.PDFDocument) => void,
 ): Promise<Buffer> {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const PDFDocument = require('pdfkit') as {
     new (options?: { size?: string; margin?: number }): PdfKit.PDFDocument;
   };
   const doc = new PDFDocument({ size: 'A4', margin: 48 });
-  if (FONT_PATH) doc.registerFont('NotoSansJP', FONT_PATH);
+  if (FONT_PATH) doc.registerFont(FONT, FONT_PATH);
   build(doc);
   doc.end();
   const chunks: Buffer[] = [];
@@ -65,8 +112,12 @@ async function renderDoc(
 export class PdfService {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** GET /invoices/:id/pdf — a single 請求書 for one invoice. */
-  async invoicePdf(invoiceId: string, user: AuthenticatedUser): Promise<PdfFile> {
+  /** GET /invoices/:id/pdf — an invoice for one unit. */
+  async invoicePdf(
+    invoiceId: string,
+    user: AuthenticatedUser,
+    overrides: { locale?: string; currency?: string } = {},
+  ): Promise<PdfFile> {
     const invoice = await this.prisma.invoice.findUnique({
       where: { id: invoiceId },
       include: {
@@ -101,6 +152,7 @@ export class PdfService {
 
     const building = invoice.unit.building;
     const branding = building.branding;
+    const settings = resolvePdfSettings(building, overrides);
     const body = await renderDoc((doc) =>
       buildInvoicePdf(doc, {
         buildingName: building.name,
@@ -113,19 +165,25 @@ export class PdfService {
         paidCents: invoice.paidCents,
         status: invoice.status,
         lineItems,
+        settings,
       }),
     );
 
     return {
       body,
       contentType: PDF_CONTENT_TYPE,
-      filename: `seikyu-${invoice.periodYearMonth}-${invoice.unit.label}.pdf`,
-      etag: `${invoice.id}-${invoice.periodYearMonth}`,
+      filename: `invoice-${invoice.periodYearMonth}-${invoice.unit.label}.pdf`,
+      etag: `${invoice.id}-${invoice.periodYearMonth}-${settings.currency}-${settings.locale}`,
     };
   }
 
   /** GET /statements/:unitId/pdf?year=… — annual statement PDF. */
-  async statementPdf(unitId: string, year: string, user: AuthenticatedUser): Promise<PdfFile> {
+  async statementPdf(
+    unitId: string,
+    year: string,
+    user: AuthenticatedUser,
+    overrides: { locale?: string; currency?: string } = {},
+  ): Promise<PdfFile> {
     const unit = await this.prisma.unit.findUnique({
       where: { id: unitId },
       include: { building: { include: { branding: true } } },
@@ -168,6 +226,7 @@ export class PdfService {
     const totalInvoiced = rows.reduce((sum, row) => sum + row.invoicedCents, 0);
     const totalPaid = invoices.reduce((sum, inv) => sum + inv.paidCents, 0);
     const branding = unit.building.branding;
+    const settings = resolvePdfSettings(unit.building, overrides);
 
     const body = await renderDoc((doc) =>
       buildStatementPdf(doc, {
@@ -180,6 +239,7 @@ export class PdfService {
         totalInvoicedCents: totalInvoiced,
         totalPaidCents: totalPaid,
         balanceCents: totalInvoiced - totalPaid,
+        settings,
       }),
     );
 
@@ -187,7 +247,7 @@ export class PdfService {
       body,
       contentType: PDF_CONTENT_TYPE,
       filename: `statement-${unit.label}-${year}.pdf`,
-      etag: `${unit.id}-${year}`,
+      etag: `${unit.id}-${year}-${settings.currency}-${settings.locale}`,
     };
   }
 }
@@ -203,38 +263,41 @@ interface InvoicePdfInput {
   paidCents: number;
   status: string;
   lineItems: { description: string; category: string; amountCents: number }[];
+  settings: PdfMoneySettings;
 }
 
 function buildInvoicePdf(doc: PdfKit.PDFDocument, input: InvoicePdfInput): void {
-  doc.font(FONT).fontSize(10).fillColor('#6b7280').text('インボイス / 請求書', 48, 48, { align: 'center' });
-  doc.font(FONT).fontSize(18).fillColor(input.primaryColor).text('請求書', 48, 64, { align: 'center' });
+  const money = (minor: number): string =>
+    formatPdfMoney(minor, input.settings);
+  doc.font(FONT).fontSize(10).fillColor('#6b7280').text('INVOICE', 48, 48, { align: 'center' });
+  doc.font(FONT).fontSize(18).fillColor(input.primaryColor).text('Invoice', 48, 64, { align: 'center' });
   doc.moveDown(1);
   doc.font(FONT).fontSize(11).fillColor('#111827');
   doc.text(input.orgName);
   doc.moveDown(0.2);
   doc.font(FONT).fontSize(9).fillColor('#6b7280');
-  doc.text(`登録番号: ${input.invoiceRegistrationNo ?? '(未登録)'}`);
+  doc.text(`Tax registration: ${input.invoiceRegistrationNo ?? '(not provided)'}`);
   doc.moveDown();
 
   doc.font(FONT).fontSize(11).fillColor('#111827');
-  doc.text(`部屋: ${input.unitLabel}`);
-  doc.text(`期間: ${input.periodYearMonth}`);
-  doc.text(`合計金額: ${money(input.totalCents)} 円`);
-  doc.text(`支払済み: ${money(input.paidCents)} 円`);
-  doc.text(`残高: ${money(input.totalCents - input.paidCents)} 円`);
-  doc.text(`支払状況: ${input.status === 'PAID' ? '支払済' : '未払'}`);
+  doc.text(`Unit: ${input.unitLabel}`);
+  doc.text(`Period: ${input.periodYearMonth}`);
+  doc.text(`Total: ${money(input.totalCents)}`);
+  doc.text(`Paid: ${money(input.paidCents)}`);
+  doc.text(`Balance: ${money(input.totalCents - input.paidCents)}`);
+  doc.text(`Status: ${input.status}`);
 
   doc.moveDown();
-  doc.font(FONT).fontSize(12).text('明細');
+  doc.font(FONT).fontSize(12).text('Details');
   doc.moveDown(0.2);
   for (const item of input.lineItems) {
     doc.font(FONT).fontSize(10);
     doc.text(`${item.category} — ${item.description}`);
     doc.font(FONT).fontSize(10);
-    doc.text(`  ${money(item.amountCents)} 円`, 100);
+    doc.text(`  ${money(item.amountCents)}`, 100);
   }
   if (input.lineItems.length === 0) {
-    doc.font(FONT).fontSize(10).text('明細なし', 100);
+    doc.font(FONT).fontSize(10).text('No details', 100);
   }
 }
 
@@ -248,37 +311,36 @@ interface StatementPdfInput {
   totalInvoicedCents: number;
   totalPaidCents: number;
   balanceCents: number;
+  settings: PdfMoneySettings;
 }
 
 function buildStatementPdf(doc: PdfKit.PDFDocument, input: StatementPdfInput): void {
-  doc.font(FONT).fontSize(18).fillColor(input.primaryColor).text('年間明細書', 48, 48, { align: 'center' });
+  const money = (minor: number): string =>
+    formatPdfMoney(minor, input.settings);
+  doc.font(FONT).fontSize(18).fillColor(input.primaryColor).text('ANNUAL STATEMENT', 48, 48, { align: 'center' });
   doc.moveDown(0.6);
   doc.font(FONT).fontSize(11).fillColor('#111827');
   doc.text(input.orgName);
   doc.moveDown();
-  doc.text(`部屋: ${input.unitLabel}`);
-  doc.text(`年度: ${input.year}`);
+  doc.text(`Unit: ${input.unitLabel}`);
+  doc.text(`Year: ${input.year}`);
   doc.moveDown();
 
-  doc.font(FONT).fontSize(12).text('月別明細');
+  doc.font(FONT).fontSize(12).text('Monthly details');
   doc.moveDown(0.2);
   for (const row of input.rows) {
     doc.font(FONT).fontSize(10);
     doc.text(`${row.period}  ${row.description}`);
     doc.font(FONT).fontSize(10);
-    doc.text(`  ${money(row.invoicedCents)} 円`, 100);
+    doc.text(`  ${money(row.invoicedCents)}`, 100);
   }
   if (input.rows.length === 0) {
-    doc.font(FONT).fontSize(10).text('データがありません', 100);
+    doc.font(FONT).fontSize(10).text('No data', 100);
   }
 
   doc.moveDown();
   doc.font(FONT).fontSize(11);
-  doc.text(`年間合計: ${money(input.totalInvoicedCents)} 円`);
-  doc.text(`支払済み: ${money(input.totalPaidCents)} 円`);
-  doc.text(`残高: ${money(input.balanceCents)} 円`);
-}
-
-function money(cents: number): string {
-  return new Intl.NumberFormat('ja-JP').format(cents / 100);
+  doc.text(`Annual total: ${money(input.totalInvoicedCents)}`);
+  doc.text(`Paid: ${money(input.totalPaidCents)}`);
+  doc.text(`Balance: ${money(input.balanceCents)}`);
 }

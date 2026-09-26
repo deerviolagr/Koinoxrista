@@ -1,3 +1,5 @@
+import type { CurrencyCode } from './money';
+
 export type PaymentOrderStatus = 'PENDING' | 'COMPLETED' | 'FAILED' | 'EXPIRED';
 
 /** A PSP checkout session for an invoice (Viva Smart Checkout order). */
@@ -6,6 +8,7 @@ export interface PaymentOrder {
   invoiceId: string;
   orderCode: string;
   amountCents: number;
+  currency?: CurrencyCode;
   status: PaymentOrderStatus;
   checkoutUrl: string;
   createdAt?: string;
@@ -21,6 +24,7 @@ export interface ArrearsRow {
   unitLabel: string;
   ownerNames: string[];
   outstandingCents: number;
+  currency?: CurrencyCode;
   /** Outstanding split into aging buckets by oldest unpaid invoice age. */
   bucketCurrentCents: number;
   bucket30Cents: number;
@@ -32,6 +36,7 @@ export interface ArrearsRow {
 export interface ArrearsReport {
   buildingId: string;
   generatedAt: string;
+  currency?: CurrencyCode;
   totalOutstandingCents: number;
   rows: ArrearsRow[];
 }

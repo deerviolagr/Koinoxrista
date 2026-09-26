@@ -27,7 +27,9 @@ export class JwtStrategy {
     private readonly prisma: PrismaService,
   ) {}
 
-  async authenticate(authorizationHeader: string | undefined): Promise<AuthenticatedUser> {
+  async authenticate(
+    authorizationHeader: string | undefined,
+  ): Promise<AuthenticatedUser> {
     const token = this.extractBearerToken(authorizationHeader);
     if (!token) {
       throw new UnauthorizedException('Missing bearer token');
@@ -55,11 +57,15 @@ export class JwtStrategy {
     if (!user) {
       throw new UnauthorizedException('User not found');
     }
+    if (user.status !== 'ACTIVE') {
+      throw new UnauthorizedException('User is not active');
+    }
     return {
       id: user.id,
       email: user.email,
       role: user.role,
       buildingId: user.buildingId ?? null,
+      status: user.status,
     };
   }
 

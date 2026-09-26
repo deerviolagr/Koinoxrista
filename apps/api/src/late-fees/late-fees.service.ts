@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import type {
   LateFeeChargeDto,
   LateFeeRunResultDto,
@@ -112,10 +117,10 @@ export class LateFeesService {
   }
 
   /**
-   * Sweeps unpaid invoices whose period month ended more than `graceDays`
-   * days ago and creates ONE charge per unit+invoiceMonth. Idempotent: units
-   * already charged for a month are skipped (also enforced by the DB unique
-   * index on [unitId, month]).
+   * Calculates late-fee candidates, but refuses to create active charges while
+   * LateFeeCharge is disconnected from the Invoice/Payment receivables model.
+   * Historical charges remain listable/waivable; a schema-backed settlement
+   * path is required before this sweep can safely become active.
    */
   async run(
     buildingId: string,
@@ -159,8 +164,20 @@ export class LateFeesService {
       existingCharges.map((charge) => `${charge.unitId}:${charge.month}`),
     );
 
-    let createdCount = 0;
-    let totalCents = 0;
+    // A LateFeeCharge has no receivable/payment relation in the current data
+    // model.  Creating one would therefore only make a number appear
+    // "collectible" while ArrearsService, checkout, and the bank importer all
+    // ignore it.  Calculate first, then fail closed before any write.  This is
+    // intentional: a schema that can settle charges must integrate them into
+    // Invoice/Payment (or add an equivalent receivables ledger) before active
+    // charges are enabled.
+    const pendingCharges: Array<{
+      invoiceId: string;
+      unitId: string;
+      month: string;
+      daysLate: number;
+      amountCents: number;
+    }> = [];
     for (const invoice of invoices) {
       const outstandingCents = invoice.totalCents - invoice.paidCents;
       if (outstandingCents <= 0) continue;
@@ -177,22 +194,25 @@ export class LateFeesService {
       if (overdueDays <= graceDays) continue;
       const chargeableDays = overdueDays - graceDays;
 
-      const amountCents = computeLateFee({ outstandingCents, daysLate: chargeableDays, setting });
-      if (amountCents <= 0) continue;
-
-      await this.prisma.lateFeeCharge.create({
-        data: {
-          buildingId,
-          unitId: invoice.unitId,
-          invoiceId: invoice.id,
-          month: invoice.periodYearMonth,
-          daysLate: chargeableDays,
-          amountCents,
-        },
+      const amountCents = computeLateFee({
+        outstandingCents,
+        daysLate: chargeableDays,
+        setting,
       });
-      chargedKeys.add(key);
-      createdCount++;
-      totalCents += amountCents;
+      if (amountCents <= 0) continue;
+      pendingCharges.push({
+        invoiceId: invoice.id,
+        unitId: invoice.unitId,
+        month: invoice.periodYearMonth,
+        daysLate: chargeableDays,
+        amountCents,
+      });
+    }
+
+    if (pendingCharges.length > 0) {
+      throw new ConflictException(
+        `Late fees are disabled: ${pendingCharges.length} charge(s) cannot be settled by the current Invoice/Payment receivables model; no charges were created`,
+      );
     }
 
     this.audit.record({
@@ -203,13 +223,13 @@ export class LateFeesService {
       entity: 'late_fee_charge',
       entityId: month ?? buildingId,
       metadata: {
-        charged: createdCount,
-        totalCents,
+        charged: 0,
+        totalCents: 0,
         ...(month ? { month } : {}),
       },
     });
 
-    return { charged: createdCount, totalCents };
+    return { charged: 0, totalCents: 0 };
   }
 
   /** Charges with unit labels, newest first. */

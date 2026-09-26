@@ -26,17 +26,17 @@ export class ProvidersController {
   constructor(private readonly providersService: ProvidersService) {}
 
   @Get()
-  @Roles(Role.ADMIN, Role.RESIDENT)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER, Role.RESIDENT)
   search(@Query() query: SearchProvidersQueryDto) {
     return this.providersService.search(query);
   }
 
   @Get(':userId')
-  @Roles(Role.ADMIN, Role.RESIDENT)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER, Role.RESIDENT)
   detail(
     @Param('userId') userId: string,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.providersService.detail(userId, user.role);
+    return this.providersService.detail(userId, user.role, user);
   }
 }

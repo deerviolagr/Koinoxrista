@@ -7,10 +7,14 @@ import {
 import { createHash, randomBytes } from 'node:crypto';
 import { Role } from '@prisma/client';
 
-import { AuthenticatedUser } from '../auth/auth.types';
+import { normalizeEmail } from '../auth/auth.types';
+import type { AuthenticatedUser } from '../auth/auth.types';
 import { assertSameBuilding } from '../common/tenant';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateInviteDto } from './dto/create-invite.dto';
+import { isInvitableRole } from './roles';
+
+export { INVITABLE_ROLES, isInvitableRole } from './roles';
 
 const DEFAULT_EXPIRY_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -57,12 +61,17 @@ export class InvitesService {
     user: AuthenticatedUser,
   ) {
     assertSameBuilding(user, buildingId);
-    const email = dto.email.toLowerCase();
+    if (!isInvitableRole(dto.role)) {
+      throw new BadRequestException('That role cannot be invited');
+    }
+    const email = normalizeEmail(dto.email);
 
     let unitId: string | null = null;
     if (dto.role === Role.RESIDENT) {
       if (!dto.unitId) {
-        throw new BadRequestException('unitId is required for RESIDENT invites');
+        throw new BadRequestException(
+          'unitId is required for RESIDENT invites',
+        );
       }
       const unit = await this.prisma.unit.findFirst({
         where: { id: dto.unitId, buildingId },
@@ -71,6 +80,10 @@ export class InvitesService {
         throw new NotFoundException('Unit not found');
       }
       unitId = unit.id;
+    } else if (dto.unitId) {
+      throw new BadRequestException(
+        'unitId is only valid for RESIDENT invites',
+      );
     }
 
     const pending = await this.prisma.invite.findFirst({

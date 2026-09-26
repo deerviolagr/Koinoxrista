@@ -61,7 +61,10 @@ function makePrisma() {
     },
     ownership: {
       findMany: jest.fn().mockResolvedValue([
-        { user: { firstName: 'Μαρία', lastName: 'Παπαδοπούλου' } },
+        {
+          unitId: 'u-a',
+          user: { firstName: 'Μαρία', lastName: 'Παπαδοπούλου' },
+        },
       ]),
     },
   };
@@ -133,7 +136,13 @@ describe('ExportsService.unitStatement', () => {
       }),
     );
     expect(prisma.ownership.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { unitId: 'u-a' } }),
+      expect.objectContaining({
+        where: expect.objectContaining({
+          unitId: 'u-a',
+          unit: { buildingId: 'building-1' },
+          AND: expect.any(Array),
+        }),
+      }),
     );
   });
 
@@ -196,7 +205,7 @@ describe('ExportsService.myUnitStatement', () => {
 
     expect(prisma.unit.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { ownerships: { some: { userId: 'resident-1' } } },
+        where: { buildingId: 'building-1', id: 'u-a' },
       }),
     );
     expect(statement.buildingName).toBe('Ηλέκτρα');

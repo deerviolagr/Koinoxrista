@@ -8,8 +8,15 @@ import type {
 
 /** Expense totals grouped by category, straight from a Prisma `groupBy`. */
 export interface ApologismosExpenseGroup {
-  categoryId: string;
+  categoryId: string | null;
   _sum: { totalCents: number | null };
+}
+
+/** Supplier cash payments grouped/selected for the requested year. */
+export interface ApologismosSupplierPayment {
+  amountCents: number;
+  categoryId?: string | null;
+  expense?: { categoryId: string | null } | null;
 }
 
 export interface ApologismosBudgetRow {
@@ -22,6 +29,7 @@ export interface ApologismosInvoiceRow {
   periodYearMonth: string;
   totalCents: number;
   paidCents: number;
+  unitId?: string;
 }
 
 export interface ApologismosInput {
@@ -29,10 +37,16 @@ export interface ApologismosInput {
   buildingName: string;
   year: string;
   generatedAt: Date;
+  /** Billed expense totals charged to residents. */
   expenseGroups: ApologismosExpenseGroup[];
   budgetRows: ApologismosBudgetRow[];
+  /** Supplier cash actually paid during the year, when available. */
+  supplierCashGroups?: ApologismosExpenseGroup[];
+  supplierPayments?: ApologismosSupplierPayment[];
   invoices: ApologismosInvoiceRow[];
   unitBalances: ApologismosUnitBalance[];
+  /** Unpaid balance from periods before `year`, keyed by unit id. */
+  priorYearArrearsByUnit?: Record<string, number>;
 }
 
 export const APOLOGISMOS_YEAR_REGEX = /^\d{4}$/;
@@ -44,33 +58,77 @@ function yearPeriods(year: string): string[] {
   return Array.from({ length: 12 }, (_, i) => `${year}-${pad2(i + 1)}`);
 }
 
+function categoryKey(value: string | null | undefined): string | null {
+  return value ?? null;
+}
+
+function categoryName(
+  key: string | null,
+  names: Map<string | null, string>,
+): string {
+  return (
+    names.get(key) ??
+    (key === null
+      ? 'Λοιπές (χωρίς κατηγορία)'
+      : `Κατηγορία ${String(key).slice(-6)}`)
+  );
+}
+
 /**
  * Pure aggregation behind GET /accountant/buildings/:buildingId/apologismos.
  *
- * - income = what residents were charged (expense totals per category)
- * - costs  = budget plan vs actual supplier expenses per category
- * - monthly = invoiced vs collected per calendar month
- * - unitBalances = year-end closing balances (statements engine, precomputed)
- * - surplus/deficit = collected − actual costs
+ * - income = billed expense totals charged to residents
+ * - costs = supplier cash actually paid (not the billed expense total)
+ * - monthly = current-year invoiced vs collected
+ * - arrears = current-year arrears plus unpaid prior-year balances
+ * - unitBalances = current-year statement balance plus opening arrears
+ * - surplus/deficit = collected − supplier cash cost
+ *
+ * `supplierCashGroups`/`supplierPayments` are optional only for compatibility
+ * with older pure-function callers.  The service always supplies an explicit
+ * empty collection when there were no cash payments, so production reports do
+ * not silently substitute billed expenses for cash cost.
  */
 export function buildApologismos(
   input: ApologismosInput,
 ): ApologismosDto {
   const chargedByKey = new Map<string | null, number>();
-  for (const group of input.expenseGroups) {
+  for (const group of input.expenseGroups ?? []) {
+    const key = categoryKey(group.categoryId);
     chargedByKey.set(
-      group.categoryId,
-      (chargedByKey.get(group.categoryId) ?? 0) + (group._sum.totalCents ?? 0),
+      key,
+      (chargedByKey.get(key) ?? 0) + (group._sum.totalCents ?? 0),
     );
+  }
+
+  const cashByKey = new Map<string | null, number>();
+  const hasExplicitCash =
+    input.supplierCashGroups !== undefined || input.supplierPayments !== undefined;
+  if (input.supplierCashGroups) {
+    for (const group of input.supplierCashGroups) {
+      const key = categoryKey(group.categoryId);
+      cashByKey.set(
+        key,
+        (cashByKey.get(key) ?? 0) + (group._sum.totalCents ?? 0),
+      );
+    }
+  } else if (input.supplierPayments) {
+    for (const payment of input.supplierPayments) {
+      const key = categoryKey(
+        payment.categoryId ?? payment.expense?.categoryId,
+      );
+      cashByKey.set(key, (cashByKey.get(key) ?? 0) + payment.amountCents);
+    }
   }
 
   const nameByKey = new Map<string | null, string>();
   const plannedByKey = new Map<string | null, number>();
-  for (const row of input.budgetRows) {
-    nameByKey.set(row.categoryId, row.categoryName);
+  for (const row of input.budgetRows ?? []) {
+    const key = categoryKey(row.categoryId);
+    nameByKey.set(key, row.categoryName);
     plannedByKey.set(
-      row.categoryId,
-      (plannedByKey.get(row.categoryId) ?? 0) + row.plannedCents,
+      key,
+      (plannedByKey.get(key) ?? 0) + row.plannedCents,
     );
   }
 
@@ -81,28 +139,32 @@ export function buildApologismos(
   const incomeByCategory: ApologismosCategoryTotal[] = [...incomeKeys]
     .filter((key) => key !== null || (chargedByKey.get(null) ?? 0) > 0)
     .map((key) => ({
-      categoryId: key ?? null,
-      categoryName:
-        nameByKey.get(key ?? null) ??
-        (key === null
-          ? 'Λοιπές (χωρίς κατηγορία)'
-          : `Κατηγορία ${String(key).slice(-6)}`),
-      chargedCents: chargedByKey.get(key ?? null) ?? 0,
+      categoryId: key,
+      categoryName: categoryName(key, nameByKey),
+      chargedCents: chargedByKey.get(key) ?? 0,
     }))
     .sort((a, b) => b.chargedCents - a.chargedCents);
 
-  const costsByCategory: ApologismosCostRow[] = input.budgetRows.map(
-    (row) => ({
-      categoryId: row.categoryId,
-      categoryName: row.categoryName,
-      plannedCents: row.plannedCents,
-      actualCents: chargedByKey.get(row.categoryId ?? null) ?? 0,
-    }),
-  );
+  // Costs include budget-only, billed-only and cash-only categories.  When
+  // no explicit cash dataset was supplied, retain the old pure-helper
+  // behaviour for external callers; the service supplies [] explicitly.
+  const cashForCost = (key: string | null): number =>
+    hasExplicitCash ? cashByKey.get(key) ?? 0 : chargedByKey.get(key) ?? 0;
+  const costKeys = new Set<string | null>([
+    ...plannedByKey.keys(),
+    ...chargedByKey.keys(),
+    ...(hasExplicitCash ? cashByKey.keys() : []),
+  ]);
+  const costsByCategory: ApologismosCostRow[] = [...costKeys].map((key) => ({
+    categoryId: key,
+    categoryName: categoryName(key, nameByKey),
+    plannedCents: plannedByKey.get(key) ?? 0,
+    actualCents: cashForCost(key),
+  }));
 
   const periods = yearPeriods(input.year);
   const invoiceSums = new Map<string, { total: number; paid: number }>();
-  for (const invoice of input.invoices) {
+  for (const invoice of input.invoices ?? []) {
     if (!periods.includes(invoice.periodYearMonth)) continue;
     const sums = invoiceSums.get(invoice.periodYearMonth) ?? {
       total: 0,
@@ -122,6 +184,17 @@ export function buildApologismos(
     };
   });
 
+  const priorArrearsByUnit = input.priorYearArrearsByUnit ?? {};
+  const priorArrearsCents = Object.values(priorArrearsByUnit).reduce(
+    (sum, value) => sum + Math.max(0, value),
+    0,
+  );
+  const unitBalances = input.unitBalances.map((unit) => ({
+    ...unit,
+    balanceCents:
+      unit.balanceCents + Math.max(0, priorArrearsByUnit[unit.unitId] ?? 0),
+  }));
+
   const totals = {
     chargedCents: incomeByCategory.reduce(
       (sum, row) => sum + row.chargedCents,
@@ -137,13 +210,11 @@ export function buildApologismos(
       (sum, point) => sum + point.collectedCents,
       0,
     ),
-    arrearsCents: 0,
+    arrearsCents:
+      monthly.reduce((sum, point) => sum + point.arrearsCents, 0) +
+      priorArrearsCents,
     surplusDeficitCents: 0,
   };
-  totals.arrearsCents = monthly.reduce(
-    (sum, point) => sum + point.arrearsCents,
-    0,
-  );
   totals.surplusDeficitCents = totals.collectedCents - totals.actualCents;
 
   return {
@@ -154,7 +225,7 @@ export function buildApologismos(
     incomeByCategory,
     costsByCategory,
     monthly,
-    unitBalances: [...input.unitBalances].sort((a, b) =>
+    unitBalances: [...unitBalances].sort((a, b) =>
       a.unitLabel.localeCompare(b.unitLabel, 'el'),
     ),
     totals,

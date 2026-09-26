@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { RouterLink } from '@angular/router';
 import { EMPTY, catchError } from 'rxjs';
 import { CreateVoteDto, VoteThresholdType } from '@org/shared';
 import { BuildingsApiService } from '../../core/api/buildings-api.service';
@@ -44,7 +45,7 @@ export function buildCreateVoteDto(value: {
 
 @Component({
   selector: 'app-admin-votes',
-  imports: [ReactiveFormsModule, ConfirmModalComponent, VoteTallyComponent],
+  imports: [ReactiveFormsModule, ConfirmModalComponent, VoteTallyComponent, RouterLink],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="mb-6 flex items-center justify-between">
@@ -101,7 +102,10 @@ export function buildCreateVoteDto(value: {
       <div class="card text-sm text-slate-500">Φόρτωση…</div>
     } @else if (error()) {
       <div class="card border-red-200 bg-red-50 text-sm text-red-700">
-        Αποτυχία φόρτωσης ψηφοφοριών.
+        <p>Αποτυχία φόρτωσης ψηφοφοριών.</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="reload()">
+          Δοκιμή ξανά
+        </button>
       </div>
     } @else {
       <div class="grid gap-4 md:grid-cols-2">
@@ -121,8 +125,28 @@ export function buildCreateVoteDto(value: {
             </p>
             <p class="text-xs text-slate-500">Ψήφοι: {{ vote.ballotsCount }}</p>
 
+            @if (vote.status === 'SCHEDULED') {
+              <a
+                class="btn btn-secondary !px-3 !py-1 text-xs"
+                [routerLink]="['/admin/votes', vote.id, 'assembly']"
+              >
+                Προετοιμασία συνέλευσης
+              </a>
+            }
             @if (vote.status !== 'SCHEDULED') {
               <div class="flex flex-wrap gap-2">
+                <a
+                  class="btn btn-secondary !px-3 !py-1 text-xs"
+                  [routerLink]="['/admin/votes', vote.id, 'assembly']"
+                >
+                  Συνέλευση
+                </a>
+                <a
+                  class="btn btn-secondary !px-3 !py-1 text-xs"
+                  [routerLink]="['/admin/praktiko', vote.id]"
+                >
+                  Πρακτικό
+                </a>
                 <button
                   type="button"
                   class="btn btn-secondary !px-3 !py-1 text-xs"
@@ -237,7 +261,12 @@ export class AdminVotesPage implements OnInit {
     if (!buildingId) return;
     this.votesApi
       .list(buildingId)
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.toast.error('Η ανανέωση της λίστας ψηφοφοριών απέτυχε.');
+          return EMPTY;
+        }),
+      )
       .subscribe((votes) => this.votes.set(votes));
   }
 

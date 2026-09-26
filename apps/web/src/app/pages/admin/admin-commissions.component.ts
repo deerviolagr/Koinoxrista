@@ -12,7 +12,7 @@ import {
   commissionStatusLabel,
 } from '../../core/api/marketplace-api.service';
 import { ToastService } from '../../ui/toast.service';
-import { formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 import { BarChartComponent } from '../../ui/charts/bar-chart.component';
 
 type StatusFilter = JobCommissionStatus | '';
@@ -40,7 +40,8 @@ function statusChipClass(status: JobCommissionStatus): string {
       <div class="card text-sm text-slate-500">Φόρτωση…</div>
     } @else if (loadError()) {
       <div class="card border-red-200 bg-red-50 text-sm text-red-700">
-        Αποτυχία φόρτωσης. Δοκιμάστε ξανά.
+        <p>Αποτυχία φόρτωσης.</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="loadBuilding()">Δοκιμή ξανά</button>
       </div>
     } @else {
       <!-- Year selector -->
@@ -177,10 +178,12 @@ function statusChipClass(status: JobCommissionStatus): string {
 })
 export class AdminCommissionsPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly marketplaceApi = inject(MarketplaceApiService);
   private readonly toast = inject(ToastService);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
   protected readonly statusLabel = commissionStatusLabel;
   protected readonly statusChipClass = statusChipClass;
 
@@ -234,9 +237,21 @@ export class AdminCommissionsPage implements OnInit {
   );
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    this.loading.set(true);
+    this.loadError.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.reload();
@@ -250,7 +265,13 @@ export class AdminCommissionsPage implements OnInit {
     // The list is not year-scoped server-side; the chart is.
     this.marketplaceApi
       .commissionSummary(this.buildingId, year)
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((summary) => this.summary.set(summary));
   }
 
@@ -324,7 +345,13 @@ export class AdminCommissionsPage implements OnInit {
     if (!this.buildingId) return;
     this.marketplaceApi
       .commissions(this.buildingId)
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.toast.error('Η ανανέωση των προμηθειών απέτυχε.');
+          return EMPTY;
+        }),
+      )
       .subscribe((commissions) => this.commissions.set(commissions));
   }
 }

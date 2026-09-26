@@ -46,7 +46,7 @@ interface GoCardlessBookedTx {
   transactionId?: string;
   entryReference?: string;
   bookingDate?: string;
-  transactionAmount?: { amount?: string };
+  transactionAmount?: { amount?: string; currency?: string };
   remittanceInformationUnstructured?: string;
 }
 
@@ -60,6 +60,9 @@ function toRawTx(booked: GoCardlessBookedTx): RawTx | null {
     externalId,
     bookedAt: new Date(Date.parse(`${booked.bookingDate}T12:00:00Z`)),
     amountCents,
+    ...(booked.transactionAmount?.currency
+      ? { currency: booked.transactionAmount.currency.toUpperCase() }
+      : {}),
     ...(booked.remittanceInformationUnstructured
       ? { remittanceInfo: booked.remittanceInformationUnstructured }
       : {}),

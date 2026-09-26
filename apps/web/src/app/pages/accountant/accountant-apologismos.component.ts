@@ -10,15 +10,26 @@ import { DOCUMENT } from '@angular/common';
 import { ActivatedRoute } from '@angular/router';
 import { EMPTY, catchError, of } from 'rxjs';
 import type { PublicBrandingDto } from '@org/shared';
-import { AccountantApiService, ApologismosDto } from '../../core/api/accountant-api.service';
 import {
-  BrandingApiService,
-} from '../../core/api/branding-api.service';
-import { formatEuros } from '../../ui/format';
+  AccountantApiService,
+  ApologismosDto,
+} from '../../core/api/accountant-api.service';
+import { BrandingApiService } from '../../core/api/branding-api.service';
+import { MoneyPipe } from '../../ui/money.pipe';
 
 const MONTHS_EL = [
-  'Ιανουάριος', 'Φεβρουάριος', 'Μάρτιος', 'Απρίλιος', 'Μάιος', 'Ιούνιος',
-  'Ιούλιος', 'Αύγουστος', 'Σεπτέμβριος', 'Οκτώβριος', 'Νοέμβριος', 'Δεκέμβριος',
+  'Ιανουάριος',
+  'Φεβρουάριος',
+  'Μάρτιος',
+  'Απρίλιος',
+  'Μάιος',
+  'Ιούνιος',
+  'Ιούλιος',
+  'Αύγουστος',
+  'Σεπτέμβριος',
+  'Οκτώβριος',
+  'Νοέμβριος',
+  'Δεκέμβριος',
 ];
 
 /** "2026-03" → "Μάρτιος 2026" (pure). */
@@ -35,6 +46,7 @@ export function monthLabel(periodYearMonth: string): string {
  */
 @Component({
   selector: 'app-accountant-apologismos',
+  imports: [MoneyPipe],
   changeDetection: ChangeDetectionStrategy.OnPush,
   styles: `
     @media print {
@@ -50,7 +62,9 @@ export function monthLabel(periodYearMonth: string): string {
   `,
   template: `
     <div class="mx-auto max-w-4xl">
-      <div class="print:hidden mb-6 flex flex-wrap items-center justify-between gap-3">
+      <div
+        class="print:hidden mb-6 flex flex-wrap items-center justify-between gap-3"
+      >
         <h1 class="text-xl font-bold text-slate-900">Απολογισμός</h1>
         <div class="flex flex-wrap items-end gap-2">
           <label class="label !mb-0" for="apologismos-year">Έτος</label>
@@ -82,7 +96,10 @@ export function monthLabel(periodYearMonth: string): string {
       } @else if (data(); as d) {
         <article class="card overflow-hidden p-8">
           @if (branding(); as b) {
-            <div class="-mx-8 -mt-8 mb-6 h-1.5" [style.background-color]="b.primaryColor"></div>
+            <div
+              class="-mx-8 -mt-8 mb-6 h-1.5"
+              [style.background-color]="b.primaryColor"
+            ></div>
           }
           <header class="mb-6 border-b border-slate-200 pb-4">
             @if (branding(); as b) {
@@ -102,7 +119,9 @@ export function monthLabel(periodYearMonth: string): string {
                 </p>
               }
             }
-            <h2 class="text-lg font-bold text-slate-900">{{ d.buildingName }}</h2>
+            <h2 class="text-lg font-bold text-slate-900">
+              {{ d.buildingName }}
+            </h2>
             <p class="mt-1 text-sm text-slate-600">
               Ετήσιος απολογισμός κοινοχρήστων — Έτος {{ d.year }}
             </p>
@@ -111,7 +130,9 @@ export function monthLabel(periodYearMonth: string): string {
           <!-- Έσοδα / έξοδα ανά κατηγορία -->
           <section class="mb-8 grid gap-8 md:grid-cols-2">
             <div>
-              <h3 class="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">
+              <h3
+                class="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500"
+              >
                 Έσοδα (χρεώσεις ανά κατηγορία)
               </h3>
               <table class="data-table">
@@ -119,24 +140,32 @@ export function monthLabel(periodYearMonth: string): string {
                   @for (row of d.incomeByCategory; track row.categoryId) {
                     <tr>
                       <td>{{ row.categoryName }}</td>
-                      <td class="text-right">{{ euros(row.chargedCents) }}</td>
+                      <td class="text-right">
+                        {{ row.chargedCents | money: d.currency }}
+                      </td>
                     </tr>
                   } @empty {
                     <tr>
-                      <td colspan="2" class="py-4 text-center text-slate-500">—</td>
+                      <td colspan="2" class="py-4 text-center text-slate-500">
+                        —
+                      </td>
                     </tr>
                   }
                 </tbody>
                 <tfoot>
                   <tr class="font-semibold text-slate-900">
                     <td>ΣΥΝΟΛΟ</td>
-                    <td class="text-right">{{ euros(d.totals.chargedCents) }}</td>
+                    <td class="text-right">
+                      {{ d.totals.chargedCents | money: d.currency }}
+                    </td>
                   </tr>
                 </tfoot>
               </table>
             </div>
             <div>
-              <h3 class="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">
+              <h3
+                class="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500"
+              >
                 Δαπάνες vs προϋπολογισμό
               </h3>
               <table class="data-table">
@@ -151,20 +180,30 @@ export function monthLabel(periodYearMonth: string): string {
                   @for (row of d.costsByCategory; track row.categoryId) {
                     <tr>
                       <td>{{ row.categoryName }}</td>
-                      <td class="text-right">{{ euros(row.plannedCents) }}</td>
-                      <td class="text-right">{{ euros(row.actualCents) }}</td>
+                      <td class="text-right">
+                        {{ row.plannedCents | money: d.currency }}
+                      </td>
+                      <td class="text-right">
+                        {{ row.actualCents | money: d.currency }}
+                      </td>
                     </tr>
                   } @empty {
                     <tr>
-                      <td colspan="3" class="py-4 text-center text-slate-500">—</td>
+                      <td colspan="3" class="py-4 text-center text-slate-500">
+                        —
+                      </td>
                     </tr>
                   }
                 </tbody>
                 <tfoot>
                   <tr class="font-semibold text-slate-900">
                     <td>ΣΥΝΟΛΟ</td>
-                    <td class="text-right">{{ euros(d.totals.plannedCents) }}</td>
-                    <td class="text-right">{{ euros(d.totals.actualCents) }}</td>
+                    <td class="text-right">
+                      {{ d.totals.plannedCents | money: d.currency }}
+                    </td>
+                    <td class="text-right">
+                      {{ d.totals.actualCents | money: d.currency }}
+                    </td>
                   </tr>
                 </tfoot>
               </table>
@@ -173,7 +212,9 @@ export function monthLabel(periodYearMonth: string): string {
 
           <!-- Μηνιαίες εισπράξεις -->
           <section class="mb-8">
-            <h3 class="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">
+            <h3
+              class="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500"
+            >
               Αποτελέσματα ανά μήνα
             </h3>
             <table class="data-table">
@@ -188,14 +229,20 @@ export function monthLabel(periodYearMonth: string): string {
               <tbody>
                 @for (point of d.monthly; track point.periodYearMonth) {
                   <tr>
-                    <td class="whitespace-nowrap">{{ monthLabelOf(point.periodYearMonth) }}</td>
-                    <td class="text-right">{{ euros(point.invoicedCents) }}</td>
-                    <td class="text-right">{{ euros(point.collectedCents) }}</td>
+                    <td class="whitespace-nowrap">
+                      {{ monthLabelOf(point.periodYearMonth) }}
+                    </td>
+                    <td class="text-right">
+                      {{ point.invoicedCents | money: d.currency }}
+                    </td>
+                    <td class="text-right">
+                      {{ point.collectedCents | money: d.currency }}
+                    </td>
                     <td
                       class="text-right"
                       [class.text-red-700]="point.arrearsCents > 0"
                     >
-                      {{ euros(point.arrearsCents) }}
+                      {{ point.arrearsCents | money: d.currency }}
                     </td>
                   </tr>
                 }
@@ -203,9 +250,15 @@ export function monthLabel(periodYearMonth: string): string {
               <tfoot>
                 <tr class="font-semibold text-slate-900">
                   <td>ΣΥΝΟΛΟ</td>
-                  <td class="text-right">{{ euros(d.totals.invoicedCents) }}</td>
-                  <td class="text-right">{{ euros(d.totals.collectedCents) }}</td>
-                  <td class="text-right">{{ euros(d.totals.arrearsCents) }}</td>
+                  <td class="text-right">
+                    {{ d.totals.invoicedCents | money: d.currency }}
+                  </td>
+                  <td class="text-right">
+                    {{ d.totals.collectedCents | money: d.currency }}
+                  </td>
+                  <td class="text-right">
+                    {{ d.totals.arrearsCents | money: d.currency }}
+                  </td>
                 </tr>
               </tfoot>
             </table>
@@ -213,7 +266,9 @@ export function monthLabel(periodYearMonth: string): string {
 
           <!-- Υπόλοιπα ανά διαμέρισμα -->
           <section class="mb-8">
-            <h3 class="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">
+            <h3
+              class="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500"
+            >
               Υπόλοιπα διαμερισμάτων (κλείσιμο έτους)
             </h3>
             <table class="data-table">
@@ -231,14 +286,18 @@ export function monthLabel(periodYearMonth: string): string {
                   <tr>
                     <td class="font-medium">{{ unit.unitLabel }}</td>
                     <td>{{ unit.ownerName ?? '—' }}</td>
-                    <td class="text-right">{{ euros(unit.invoicedCents) }}</td>
-                    <td class="text-right">{{ euros(unit.paidCents) }}</td>
+                    <td class="text-right">
+                      {{ unit.invoicedCents | money: d.currency }}
+                    </td>
+                    <td class="text-right">
+                      {{ unit.paidCents | money: d.currency }}
+                    </td>
                     <td
                       class="text-right"
                       [class.text-red-700]="unit.balanceCents > 0"
                       [class.text-green-700]="unit.balanceCents === 0"
                     >
-                      {{ euros(unit.balanceCents) }}
+                      {{ unit.balanceCents | money: d.currency }}
                     </td>
                   </tr>
                 } @empty {
@@ -252,9 +311,15 @@ export function monthLabel(periodYearMonth: string): string {
               <tfoot>
                 <tr class="font-semibold text-slate-900">
                   <td colspan="2">ΣΥΝΟΛΟ</td>
-                  <td class="text-right">{{ euros(totalsInvoiced(d)) }}</td>
-                  <td class="text-right">{{ euros(totalsPaid(d)) }}</td>
-                  <td class="text-right">{{ euros(totalsBalance(d)) }}</td>
+                  <td class="text-right">
+                    {{ totalsInvoiced(d) | money: d.currency }}
+                  </td>
+                  <td class="text-right">
+                    {{ totalsPaid(d) | money: d.currency }}
+                  </td>
+                  <td class="text-right">
+                    {{ totalsBalance(d) | money: d.currency }}
+                  </td>
                 </tr>
               </tfoot>
             </table>
@@ -278,16 +343,19 @@ export function monthLabel(periodYearMonth: string): string {
                 {{
                   d.totals.surplusDeficitCents >= 0 ? 'Πλεόνασμα' : 'Έλλειμμα'
                 }}
-                {{ euros(Math.abs(d.totals.surplusDeficitCents)) }}
+                {{ Math.abs(d.totals.surplusDeficitCents) | money: d.currency }}
               </span>
-              (εισπραγθέντα {{ euros(d.totals.collectedCents) }} − δαπάνες
-              {{ euros(d.totals.actualCents) }})
+              (εισπραγθέντα {{ d.totals.collectedCents | money: d.currency }} −
+              δαπάνες {{ d.totals.actualCents | money: d.currency }})
             </p>
           </section>
 
           @if (branding(); as b) {
             @if (b.footerText) {
-              <p class="mt-6 text-center text-xs text-slate-500" [style.color]="b.accentColor">
+              <p
+                class="mt-6 text-center text-xs text-slate-500"
+                [style.color]="b.accentColor"
+              >
                 {{ b.footerText }}
               </p>
             }
@@ -307,7 +375,6 @@ export class AccountantApologismosPage implements OnInit, OnDestroy {
   private readonly route = inject(ActivatedRoute);
   private readonly document = inject(DOCUMENT);
 
-  protected readonly euros = formatEuros;
   protected readonly Math = Math;
 
   private readonly currentYear = new Date().getFullYear();
@@ -320,8 +387,7 @@ export class AccountantApologismosPage implements OnInit, OnDestroy {
   protected readonly buildingId =
     this.route.snapshot.paramMap.get('buildingId') ?? '';
   protected readonly year = signal(
-    this.route.snapshot.queryParamMap.get('year') ??
-      String(this.currentYear),
+    this.route.snapshot.queryParamMap.get('year') ?? String(this.currentYear),
   );
   protected readonly data = signal<ApologismosDto | null>(null);
   protected readonly loading = signal(true);

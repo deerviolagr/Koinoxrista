@@ -2,8 +2,10 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Inject,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import type {
   AgendaItemDto,
@@ -25,9 +27,9 @@ import { assertSameBuilding } from '../common/tenant';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RealtimeService } from '../realtime/realtime.service';
+import { TenancyService } from '../tenancy/tenancy.service';
 import { tallyVote, TallyThresholdType } from '../votes/tally-vote';
 import { quorumOf } from './quorum';
-import { Inject } from '@nestjs/common';
 import { LLM_PROVIDER, LlmProvider } from '../assistant/llm-provider';
 import { AttendanceToggleDto } from './dto/attendance-toggle.dto';
 import { CreateAgendaItemDto } from './dto/create-agenda-item.dto';
@@ -203,6 +205,9 @@ export class AssemblyService {
     private readonly audit: AuditService,
     private readonly realtime: RealtimeService,
     @Inject(LLM_PROVIDER) private readonly llm: LlmProvider,
+    @Optional()
+    @Inject(TenancyService)
+    private readonly tenancy?: TenancyService,
   ) {}
 
   async listAgenda(
@@ -344,7 +349,8 @@ export class AssemblyService {
 
     const rowByUnit = new Map(rows.map((row) => [row.unitId, row]));
     const choiceByUnit = new Map(ballots.map((b) => [b.unitId, b.choice]));
-    const basis = resolveOwnershipBasis(units);
+    const isHeadcount = vote.thresholdType === 'HEADCOUNT';
+    const basis = isHeadcount ? 'MILLIMES' : resolveOwnershipBasis(units);
 
     return units.map((unit) => {
       const row = rowByUnit.get(unit.id);
@@ -354,7 +360,7 @@ export class AssemblyService {
         voteId,
         unitId: unit.id,
         unitLabel: unit.label,
-        millimes: unitOwnershipWeight(unit, basis),
+        millimes: isHeadcount ? 1 : unitOwnershipWeight(unit, basis),
         present: row?.present ?? false,
         proxyUnitId: row?.proxyUnitId ?? null,
         checkedInAt: row?.checkedInAt ? row.checkedInAt.toISOString() : null,
@@ -366,32 +372,25 @@ export class AssemblyService {
   /** Recompute attendance stats and broadcast them to the building. */
   private async pushQuorum(voteId: string, buildingId: string): Promise<void> {
     try {
-      const [units, rows] = await Promise.all([      this.prisma.unit.findMany({ where: { buildingId } }),
-      this.prisma.attendance.findMany({ where: { voteId } }),
-    ]);
-      const presentIds = new Set(
-        rows
-          .filter((r) => r.present && units.some((u) => u.id === r.unitId))
-          .map((r) => r.unitId),
-      );
-      const basis = resolveOwnershipBasis(units);
-      const totalMillimes = totalOwnershipWeight(units, basis);
-      const millimesPresent = units
-        .filter((u) => presentIds.has(u.id))
-        .reduce((sum, u) => sum + unitOwnershipWeight(u, basis), 0);
-      const { quorumMet, presentPermille } = quorumOf(
-        totalMillimes,
-        millimesPresent,
-        'MILLIMES_MAJORITY',
+      const [vote, units, rows] = await Promise.all([
+        this.prisma.vote.findUnique({ where: { id: voteId } }),
+        this.prisma.unit.findMany({ where: { buildingId } }),
+        this.prisma.attendance.findMany({ where: { voteId } }),
+      ]);
+      if (!vote || vote.buildingId !== buildingId) return;
+      const stats = buildAttendanceStats(
+        vote.thresholdType as TallyThresholdType,
+        units,
+        rows,
       );
       this.realtime.publishToBuilding(buildingId, 'assembly.attendance', {
         voteId,
-        unitsTotal: units.length,
-        unitsPresent: presentIds.size,
-        totalMillimes,
-        millimesPresent,
-        presentPermille,
-        quorumMet,
+        unitsTotal: stats.unitsTotal,
+        unitsPresent: stats.unitsPresent,
+        totalMillimes: stats.totalMillimes,
+        millimesPresent: stats.millimesPresent,
+        presentPermille: stats.presentPermille,
+        quorumMet: stats.quorumMet,
       });
     } catch (err: unknown) {
       // Realtime is best-effort; a quorum push must never break check-in.
@@ -427,7 +426,9 @@ export class AssemblyService {
         shareFraction: true,
       },
     });
-    const basis = resolveOwnershipBasis(buildingUnits);
+    const isHeadcount = vote.thresholdType === 'HEADCOUNT';
+    const basis = isHeadcount ? 'MILLIMES' : resolveOwnershipBasis(buildingUnits);
+    const displayUnit = isHeadcount ? { ...unit, millimes: 1 } : unit;
 
     const proxyUnitId = dto.proxyUnitId ?? null;
     if (proxyUnitId !== null) {
@@ -448,7 +449,7 @@ export class AssemblyService {
       existing.present === dto.present &&
       (existing.proxyUnitId ?? null) === proxyUnitId
     ) {
-      return this.toAttendanceDto(existing, unit, basis);
+      return this.toAttendanceDto(existing, displayUnit, basis);
     }
 
     const checkedInAt = dto.present ? new Date() : null;
@@ -484,7 +485,7 @@ export class AssemblyService {
     // attendance count + derived quorum line without polling.
     void this.pushQuorum(voteId, vote.buildingId);
 
-    return this.toAttendanceDto(row, unit, basis);
+    return this.toAttendanceDto(row, displayUnit, basis);
   }
 
   async getPraktiko(
@@ -495,13 +496,13 @@ export class AssemblyService {
 
     const now = new Date();
     const closed =
-      vote.result !== null || now.getTime() > vote.closesAt.getTime();
+      vote.result !== null || now.getTime() >= vote.closesAt.getTime();
 
     let tally: VoteTally;
     if (vote.result !== null) {
       tally = JSON.parse(vote.result) as VoteTally;
     } else {
-      tally = await this.computeTally(vote);
+      tally = await this.computeTally(vote, user);
       if (!closed) tally.outcome = 'PENDING';
     }
 
@@ -625,11 +626,21 @@ export class AssemblyService {
     return vote;
   }
 
-  private async computeTally(vote: {
-    id: string;
-    buildingId: string;
-    thresholdType: string;
-  }): Promise<VoteTally> {
+  private async computeTally(
+    vote: {
+      id: string;
+      buildingId: string;
+      thresholdType: string;
+    },
+    user?: AuthenticatedUser,
+  ): Promise<VoteTally> {
+    if (user && this.tenancy?.computeEligibleTally) {
+      return this.tenancy.computeEligibleTally(
+        vote.buildingId,
+        vote.id,
+        user,
+      );
+    }
     const [units, ballots] = await Promise.all([
       this.prisma.unit.findMany({
         where: { buildingId: vote.buildingId },

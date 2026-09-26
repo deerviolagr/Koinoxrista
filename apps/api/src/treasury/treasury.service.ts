@@ -33,8 +33,37 @@ function isUniqueConflict(error: unknown): boolean {
   );
 }
 
+function parseDateFilter(raw: string, endOfDay: boolean): Date {
+  const value = raw.trim();
+  // HTML date inputs send YYYY-MM-DD.  new Date('2026-12-31') is midnight
+  // and would silently exclude the rest of that day.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split('-').map(Number);
+    const parsed = new Date(
+      `${value}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}Z`,
+    );
+    if (
+      Number.isNaN(parsed.getTime()) ||
+      parsed.getUTCFullYear() !== year ||
+      parsed.getUTCMonth() + 1 !== month ||
+      parsed.getUTCDate() !== day
+    ) {
+      throw new BadRequestException(endOfDay ? 'Invalid to date' : 'Invalid from date');
+    }
+    return parsed;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new BadRequestException(endOfDay ? 'Invalid to date' : 'Invalid from date');
+  }
+  return parsed;
+}
+
 @Injectable()
 export class TreasuryService {
+  /** Serialises same-reference requests inside one API process. */
+  private readonly referenceLocks = new Map<string, Promise<void>>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
@@ -134,18 +163,17 @@ export class TreasuryService {
 
     const createdAt: Record<string, Date> = {};
     if (filters.from) {
-      const fromDate = new Date(filters.from);
-      if (Number.isNaN(fromDate.getTime())) {
-        throw new BadRequestException('Invalid from date');
-      }
-      createdAt.gte = fromDate;
+      createdAt.gte = parseDateFilter(filters.from, false);
     }
     if (filters.to) {
-      const toDate = new Date(filters.to);
-      if (Number.isNaN(toDate.getTime())) {
-        throw new BadRequestException('Invalid to date');
-      }
-      createdAt.lte = toDate;
+      createdAt.lte = parseDateFilter(filters.to, true);
+    }
+    if (
+      createdAt.gte &&
+      createdAt.lte &&
+      createdAt.gte.getTime() > createdAt.lte.getTime()
+    ) {
+      throw new BadRequestException('from must be before or equal to to');
     }
     if (Object.keys(createdAt).length > 0) {
       (where as any).createdAt = createdAt;
@@ -203,7 +231,7 @@ export class TreasuryService {
 
     const prismaAny = this.prisma as unknown as Record<string, any>;
 
-    // Isolation: account must belong to the same building
+    // Isolation: account must belong to the same building.
     const account = await prismaAny.treasuryAccount.findFirst({
       where: { id: dto.accountId, buildingId },
     });
@@ -211,35 +239,94 @@ export class TreasuryService {
       throw new NotFoundException('Treasury account not found in this building');
     }
 
-    // Atomic: create entry + update balance in a transaction
-    const entry = await (this.prisma as any).$transaction(async (tx: Record<string, any>) => {
-      const created = await tx.treasuryEntry.create({
-        data: {
-          accountId: dto.accountId,
-          buildingId,
-          amountCents: dto.amountCents,
-          direction: dto.direction,
-          method: dto.method,
-          ...(dto.reference !== undefined && dto.reference.trim() !== ''
-            ? { reference: dto.reference.trim() }
-            : {}),
-          ...(dto.notes !== undefined && dto.notes.trim() !== ''
-            ? { notes: dto.notes.trim() }
-            : {}),
-          ...(dto.receiptUrl !== undefined && dto.receiptUrl.trim() !== ''
-            ? { receiptUrl: dto.receiptUrl.trim() }
-            : {}),
-          ...(user.id ? { createdById: user.id } : {}),
+    const reference = dto.reference?.trim() ?? '';
+    const lockKey = reference
+      ? `${buildingId}:${dto.accountId}:${reference.toUpperCase()}`
+      : '';
+
+    const create = async (): Promise<{ entry: any; created: boolean }> =>
+      (this.prisma as any).$transaction(
+        async (tx: Record<string, any>) => {
+          const entryDelegate = tx.treasuryEntry ?? prismaAny.treasuryEntry;
+          const accountDelegate = tx.treasuryAccount ?? prismaAny.treasuryAccount;
+          const findEntry = entryDelegate.findFirst
+            ? () => entryDelegate.findFirst({
+                where: {
+                  buildingId,
+                  accountId: dto.accountId,
+                  reference,
+                },
+              })
+            : prismaAny.treasuryEntry?.findFirst
+              ? () => prismaAny.treasuryEntry.findFirst({
+                  where: {
+                    buildingId,
+                    accountId: dto.accountId,
+                    reference,
+                  },
+                })
+              : undefined;
+
+          // `reference` is the only durable idempotency field in the current
+          // schema.  Do not guess for entries without one; a same-reference
+          // request with different money is a conflict, not a second entry.
+          if (reference && findEntry) {
+            const existing = await findEntry();
+            if (existing) {
+              if (
+                existing.amountCents !== dto.amountCents ||
+                existing.direction !== dto.direction ||
+                existing.method !== dto.method
+              ) {
+                throw new ConflictException(
+                  'Treasury reference was already used for a different entry',
+                );
+              }
+              return { entry: existing, created: false };
+            }
+          }
+
+          const created = await entryDelegate.create({
+            data: {
+              accountId: dto.accountId,
+              buildingId,
+              amountCents: dto.amountCents,
+              direction: dto.direction,
+              method: dto.method,
+              ...(reference ? { reference } : {}),
+              ...(dto.notes !== undefined && dto.notes.trim() !== ''
+                ? { notes: dto.notes.trim() }
+                : {}),
+              ...(dto.receiptUrl !== undefined && dto.receiptUrl.trim() !== ''
+                ? { receiptUrl: dto.receiptUrl.trim() }
+                : {}),
+              ...(user.id ? { createdById: user.id } : {}),
+            },
+          });
+
+          if (accountDelegate.updateMany) {
+            const updated = await accountDelegate.updateMany({
+              where: { id: dto.accountId, buildingId },
+              data: { balanceCents: { increment: dto.amountCents } },
+            });
+            if (!updated || updated.count === 0) {
+              throw new NotFoundException('Treasury account not found in this building');
+            }
+          } else {
+            await accountDelegate.update({
+              where: { id: dto.accountId },
+              data: { balanceCents: { increment: dto.amountCents } },
+            });
+          }
+          return { entry: created, created: true };
         },
-      });
+        // Serializable makes the reference check safe across API instances;
+        // the in-process lock below avoids needless serialization conflicts.
+        { isolationLevel: 'Serializable' as any },
+      );
 
-      await tx.treasuryAccount.update({
-        where: { id: dto.accountId },
-        data: { balanceCents: { increment: dto.amountCents } },
-      });
-
-      return created;
-    });
+    const result = lockKey ? await this.withReferenceLock(lockKey, create) : await create();
+    if (!result.created) return result.entry;
 
     this.audit.record({
       buildingId,
@@ -247,7 +334,7 @@ export class TreasuryService {
       actorRole: user.role,
       action: 'treasury.entry.created',
       entity: 'treasury_entry',
-      entityId: entry.id,
+      entityId: result.entry.id,
       metadata: {
         accountId: dto.accountId,
         amountCents: dto.amountCents,
@@ -256,7 +343,29 @@ export class TreasuryService {
       },
     });
 
-    return entry;
+    return result.entry;
+  }
+
+  private async withReferenceLock<T>(
+    key: string,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.referenceLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.then(() => current);
+    this.referenceLocks.set(key, queued);
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+      if (this.referenceLocks.get(key) === queued) {
+        this.referenceLocks.delete(key);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------

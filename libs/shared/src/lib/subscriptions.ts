@@ -1,3 +1,5 @@
+import type { CurrencyCode } from './money';
+
 export type SubscriptionTier = 'BASIC' | 'PRO' | 'PREMIUM';
 
 export type SubscriptionStatus =
@@ -51,6 +53,8 @@ export interface SubscriptionDto {
   billingCycle: BillingCycle;
   units: number;
   pricePerUnitCents: number;
+  /** ISO currency for the stored price; legacy rows may omit it (EUR). */
+  currency?: CurrencyCode;
   /** Total cents for the current/next billing period at the stored tier/cycle. */
   nextChargeCents: number;
   trialEndsAt: string | null;

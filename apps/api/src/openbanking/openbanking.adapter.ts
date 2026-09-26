@@ -9,6 +9,8 @@ export interface BankConnectionRef {
   institutionName: string;
   iban: string;
   mode: string;
+  /** ISO currency of the connected building, when the adapter knows it. */
+  currency?: string;
 }
 
 /** One raw credit/debit line pulled from a bank feed. */
@@ -18,6 +20,8 @@ export interface RawTx {
   bookedAt: Date;
   amountCents: number;
   remittanceInfo?: string;
+  /** ISO currency when the provider supplies it. */
+  currency?: string;
 }
 
 export interface BankFeedAdapter {

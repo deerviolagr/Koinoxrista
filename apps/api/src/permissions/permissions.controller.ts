@@ -32,7 +32,7 @@ export class PermissionsController {
   constructor(private readonly permissionsService: PermissionsService) {}
 
   @Get('admins')
-  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
+  @Roles(Role.BUILDING_OWNER)
   listAdmins(
     @Param('buildingId') buildingId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -41,7 +41,7 @@ export class PermissionsController {
   }
 
   @Post('admins/:userId')
-  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
+  @Roles(Role.BUILDING_OWNER)
   setPermissions(
     @Param('buildingId') buildingId: string,
     @Param('userId') userId: string,
@@ -52,7 +52,7 @@ export class PermissionsController {
   }
 
   @Get('keys')
-  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
+  @Roles(Role.BUILDING_OWNER)
   listKeys() {
     return PERMISSION_KEYS;
   }

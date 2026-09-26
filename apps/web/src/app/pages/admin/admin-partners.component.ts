@@ -16,7 +16,8 @@ import type { PartnerLeadDto, PartnerSummaryDto } from '@org/shared';
 import { PARTNER_CATEGORIES } from '@org/shared';
 import { BuildingsApiService } from '../../core/api/buildings-api.service';
 import { PartnersApiService } from '../../core/api/partners-api.service';
-import { eurosToCents, formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
+import { eurosToCents } from '../../ui/format';
 import { ToastService } from '../../ui/toast.service';
 
 /** Client mirror of the API forward-only pipeline (NEW→CONTACTED→QUOTED→{WON|LOST}). */
@@ -198,7 +199,7 @@ export function pctOfMax(cents: number, maxCents: number): number {
             <input id="contactPhone" type="tel" class="input" formControlName="contactPhone" />
           </div>
           <div>
-            <label class="label" for="expected"> Συμφωνημένη προμήθεια € </label>
+            <label class="label" for="expected"> Συμφωνημένη προμήθεια {{ currency() }} </label>
             <input
               id="expected"
               type="number"
@@ -222,11 +223,14 @@ export function pctOfMax(cents: number, maxCents: number): number {
       </div>
 
       <div class="xl:col-span-3">
-        @if (loadError()) {
+        @if (loading()) {
+          <div class="card text-sm text-slate-500">Φόρτωση…</div>
+        } @else if (loadError()) {
           <div class="card border-red-200 bg-red-50 text-sm text-red-700">
-            Αποτυχία φόρτωσης leads. Δοκιμάστε ξανά.
+            <p>Αποτυχία φόρτωσης leads.</p>
+            <button type="button" class="btn btn-secondary mt-3" (click)="loadBuilding()">Δοκιμή ξανά</button>
           </div>
-        }
+        } @else {
         <div class="grid gap-3 md:grid-cols-3 2xl:grid-cols-5">
           @for (column of columns(); track column.status) {
             <section class="rounded-lg bg-slate-50 p-3" [attr.aria-label]="column.label">
@@ -258,6 +262,7 @@ export function pctOfMax(cents: number, maxCents: number): number {
             </section>
           }
         </div>
+        }
       </div>
     </div>
 
@@ -328,7 +333,7 @@ export function pctOfMax(cents: number, maxCents: number): number {
               </div>
               @if (nextOf(lead.status).includes('WON')) {
                 <div class="mt-2">
-                  <label class="label" for="actualCommission">Πραγματική προμήθεια € (υποχρεωτικό για «Κερδήθηκε»)</label>
+                  <label class="label" for="actualCommission">Πραγματική προμήθεια {{ currency() }} (υποχρεωτικό για «Κερδήθηκε»)</label>
                   <input
                     id="actualCommission"
                     type="number"
@@ -371,11 +376,11 @@ export function pctOfMax(cents: number, maxCents: number): number {
               </div>
               <div class="grid grid-cols-2 gap-3">
                 <div>
-                  <label class="label" for="editExpected">Συμφωνημένη €</label>
+                  <label class="label" for="editExpected">Συμφωνημένη {{ currency() }}</label>
                   <input id="editExpected" type="number" min="0" step="0.01" class="input" formControlName="expectedEuros" />
                 </div>
                 <div>
-                  <label class="label" for="editActual">Πραγματική € (προαιρετικό)</label>
+                  <label class="label" for="editActual">Πραγματική {{ currency() }} (προαιρετικό)</label>
                   <input id="editActual" type="number" min="0" step="0.01" class="input" formControlName="actualEuros" />
                 </div>
               </div>
@@ -410,11 +415,13 @@ export function pctOfMax(cents: number, maxCents: number): number {
 })
 export class AdminPartnersPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly partnersApi = inject(PartnersApiService);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
 
   protected readonly statuses: readonly LeadStatus[] = [
     'NEW',
@@ -499,9 +506,21 @@ export class AdminPartnersPage implements OnInit {
   });
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    this.loading.set(true);
+    this.loadError.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.reload();
@@ -584,7 +603,6 @@ export class AdminPartnersPage implements OnInit {
     this.saving.set(true);
     this.partnersApi
       .create(this.buildingId, payload)
-      .pipe(catchError(() => EMPTY))
       .subscribe({
         next: () => {
           this.toast.success('Το referral καταχωρήθηκε.');
@@ -622,7 +640,6 @@ export class AdminPartnersPage implements OnInit {
     this.transitioning.set(true);
     this.partnersApi
       .changeStatus(lead.id, dto)
-      .pipe(catchError(() => EMPTY))
       .subscribe({
         next: () => {
           this.transitioning.set(false);
@@ -666,7 +683,6 @@ export class AdminPartnersPage implements OnInit {
     this.saving.set(true);
     this.partnersApi
       .update(lead.id, payload)
-      .pipe(catchError(() => EMPTY))
       .subscribe({
         next: () => {
           this.toast.success('Οι αλλαγές αποθηκεύτηκαν.');
@@ -684,11 +700,13 @@ export class AdminPartnersPage implements OnInit {
   protected remove(lead: PartnerLeadDto): void {
     this.partnersApi
       .delete(lead.id)
-      .pipe(catchError(() => EMPTY))
-      .subscribe(() => {
-        this.toast.info(`Διαγράφηκε: ${lead.partnerName}`);
-        this.close();
-        this.reload();
+      .subscribe({
+        next: () => {
+          this.toast.info(`Διαγράφηκε: ${lead.partnerName}`);
+          this.close();
+          this.reload();
+        },
+        error: () => this.toast.error('Η διαγραφή του lead απέτυχε.'),
       });
   }
 
@@ -721,7 +739,13 @@ export class AdminPartnersPage implements OnInit {
     if (!this.buildingId) return;
     this.partnersApi
       .summary(this.buildingId, this.year())
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((summary) => this.summary.set(summary));
   }
 }

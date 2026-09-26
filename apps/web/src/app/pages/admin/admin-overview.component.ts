@@ -7,7 +7,7 @@ import { CategoriesApiService } from '../../core/api/categories-api.service';
 import { ExpensesApiService } from '../../core/api/expenses-api.service';
 import { InvoicesApiService } from '../../core/api/invoices-api.service';
 import { UnitsApiService } from '../../core/api/units-api.service';
-import { formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 import { MoneyPipe } from '../../ui/money.pipe';
 import {
   HelpTourComponent,
@@ -92,6 +92,7 @@ interface OverviewStats {
 })
 export class AdminOverviewPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly unitsApi = inject(UnitsApiService);
   private readonly categoriesApi = inject(CategoriesApiService);
   private readonly expensesApi = inject(ExpensesApiService);
@@ -124,7 +125,8 @@ export class AdminOverviewPage implements OnInit {
     address: [''],
   });
 
-  protected euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
 
   ngOnInit(): void {
     this.load();

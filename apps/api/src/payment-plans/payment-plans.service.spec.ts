@@ -36,7 +36,23 @@ function makePrisma() {
   return {
     $transaction: jest.fn((ops: unknown[]) => Promise.all(ops)),
     unit: { findFirst: jest.fn().mockResolvedValue(null) },
-    invoice: { findMany: jest.fn().mockResolvedValue([]) },
+    invoice: {
+      findMany: jest.fn().mockResolvedValue([
+        {
+          id: 'invoice-1',
+          buildingId: 'building-1',
+          unitId: 'unit-a',
+          periodYearMonth: '2026-08',
+          totalCents: 10_000,
+          paidCents: 0,
+        },
+      ]),
+      update: jest.fn().mockResolvedValue({}),
+    },
+    payment: {
+      findFirst: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockResolvedValue({ id: 'payment-1' }),
+    },
     ownership: { findMany: jest.fn().mockResolvedValue([]) },
     paymentPlan: {
       findFirst: jest.fn().mockResolvedValue(null),
@@ -392,7 +408,7 @@ describe('PaymentPlansService.recordPayment', () => {
     });
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);
     const ops = prisma.$transaction.mock.calls[0][0] as unknown[];
-    expect(ops).toHaveLength(2); // 1 installment + plan completion
+    expect(ops).toHaveLength(4); // payment + invoice + installment + plan completion
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'payment-plan.payment',
@@ -428,7 +444,7 @@ describe('PaymentPlansService.cancel', () => {
     service = new PaymentPlansService(prisma as unknown as PrismaService, audit);
   });
 
-  it('removes the unsettled installments, marks CANCELLED and audits what was dropped', async () => {
+  it('retains the cancellation schedule, marks CANCELLED and audits what was dropped', async () => {
     const before = makePlan({}, [
       makeInstallment('inst-1', 1, 5_000, 5_000, new Date('2026-09-02T10:00:00.000Z')),
       makeInstallment('inst-2', 2, 3_000),
@@ -436,7 +452,11 @@ describe('PaymentPlansService.cancel', () => {
     ]);
     const after = makePlan(
       { status: 'CANCELLED', cancelledAt: new Date('2026-08-25T11:00:00.000Z') },
-      [makeInstallment('inst-1', 1, 5_000, 5_000, new Date('2026-09-02T10:00:00.000Z'))],
+      [
+        makeInstallment('inst-1', 1, 5_000, 5_000, new Date('2026-09-02T10:00:00.000Z')),
+        makeInstallment('inst-2', 2, 3_000),
+        makeInstallment('inst-3', 3, 2_000),
+      ],
     );
     prisma.paymentPlan.findFirst
       .mockResolvedValueOnce(before)
@@ -446,9 +466,7 @@ describe('PaymentPlansService.cancel', () => {
 
     expect(result.status).toBe('CANCELLED');
     expect(result.cancelledAt).toBe('2026-08-25T11:00:00.000Z');
-    expect(prisma.paymentPlanInstallment.deleteMany).toHaveBeenCalledWith({
-      where: { id: { in: ['inst-2', 'inst-3'] } },
-    });
+    expect(prisma.paymentPlanInstallment.deleteMany).not.toHaveBeenCalled();
     expect(prisma.paymentPlan.update).toHaveBeenCalledWith({
       where: { id: 'plan-1' },
       data: expect.objectContaining({ status: 'CANCELLED' }),

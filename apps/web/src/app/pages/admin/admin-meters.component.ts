@@ -34,6 +34,11 @@ function currentPeriod(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
 
+/** Dirty values are scoped to a billing period; the same cell in two months is independent. */
+export function meterReadingKey(period: string, unitId: string, kind: string): string {
+  return `${period}|${unitId}|${kind}`;
+}
+
 @Component({
   selector: 'app-admin-meters',
   imports: [ReactiveFormsModule],
@@ -124,11 +129,16 @@ function currentPeriod(): string {
             Οι τιμές είναι ανα μήνα κατανάλωση: λίτρα (νερό) ή Wh (θέρμανση).
           </span>
         </h2>
-        @if (loadError()) {
+        @if (loading()) {
+          <div class="m-4 text-sm text-slate-500">Φόρτωση…</div>
+        } @else if (loadError()) {
           <div class="m-4 border-red-200 bg-red-50 p-4 text-sm text-red-700">
-            Αποτυχία φόρτωσης αναγνώσεων.
+            <p>Αποτυχία φόρτωσης αναγνώσεων.</p>
+            <button type="button" class="btn btn-secondary mt-3" (click)="loadBuilding()">
+              Δοκιμή ξανά
+            </button>
           </div>
-        }
+        } @else {
         <table class="data-table">
           <thead>
             <tr>
@@ -168,6 +178,7 @@ function currentPeriod(): string {
             }
           </tbody>
         </table>
+        }
         <div class="flex items-center gap-3 p-4">
           <button
             type="button"
@@ -258,9 +269,13 @@ export class AdminMetersPage implements OnInit {
 
   protected readonly savingMeter = signal(false);
   protected readonly savingReadings = signal(false);
+  protected readonly loading = signal(true);
   protected readonly loadError = signal(false);
 
-  protected readonly dirtyCount = computed(() => this.dirtyKeys().size);
+  protected readonly dirtyCount = computed(() => {
+    const prefix = `${this.period()}|`;
+    return [...this.dirtyKeys()].filter((key) => key.startsWith(prefix)).length;
+  });
 
   protected readonly maxConsumed = computed(() =>
     Math.max(1, ...this.consumption().map((entry) => entry.consumed)),
@@ -275,14 +290,33 @@ export class AdminMetersPage implements OnInit {
   private buildingId: string | null = null;
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    if (this.loading() && this.buildingId) return;
+    this.loading.set(true);
+    this.loadError.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.unitsApi
           .list(building.id)
-          .pipe(catchError(() => EMPTY))
+          .pipe(
+            catchError(() => {
+              this.loadError.set(true);
+              this.loading.set(false);
+              return EMPTY;
+            }),
+          )
           .subscribe((units) =>
             this.units.set(units.map(({ id, label }) => ({ id, label }))),
           );
@@ -307,7 +341,7 @@ export class AdminMetersPage implements OnInit {
   }
 
   protected cellValue(unitId: string, kind: string): string {
-    return this.values()[`${unitId}:${kind}`] ?? '';
+    return this.values()[meterReadingKey(this.period(), unitId, kind)] ?? '';
   }
 
   protected onCellValueChange(
@@ -316,7 +350,7 @@ export class AdminMetersPage implements OnInit {
     event: Event,
   ): void {
     const value = (event.target as HTMLInputElement).value;
-    const key = `${unitId}:${kind}`;
+    const key = meterReadingKey(this.period(), unitId, kind);
     this.values.update((current) => ({ ...current, [key]: value }));
     this.dirtyKeys.update((current) => new Set(current).add(key));
   }
@@ -367,13 +401,15 @@ export class AdminMetersPage implements OnInit {
     if (!this.buildingId || this.savingReadings()) return;
     const period = this.period();
     const posts: { meterId: string; value: number }[] = [];
+    const periodPrefix = `${period}|`;
     let missingMeter = false;
     for (const key of this.dirtyKeys()) {
+      if (!key.startsWith(periodPrefix)) continue;
       const raw = this.values()[key];
       if (raw === undefined || raw.trim() === '') continue;
       const value = Number(raw);
       if (!Number.isInteger(value) || value < 0) continue;
-      const [unitId, kind] = key.split(':') as [string, 'WATER' | 'HEAT'];
+      const [, unitId, kind] = key.split('|') as [string, string, 'WATER' | 'HEAT'];
       const row = this.matrix().rows.find((r) => r.unitId === unitId);
       const cell = row ? row.cells[kind] : undefined;
       if (!cell) {
@@ -386,7 +422,15 @@ export class AdminMetersPage implements OnInit {
       this.toast.error('Υπάρχουν τιμές χωρίς καταχωρημένο μετρητή.');
     }
     if (posts.length === 0) {
-      if (!missingMeter) this.dirtyKeys.set(new Set());
+      if (!missingMeter) {
+        this.dirtyKeys.update((keys) => {
+          const next = new Set(keys);
+          for (const key of next) {
+            if (key.startsWith(periodPrefix)) next.delete(key);
+          }
+          return next;
+        });
+      }
       return;
     }
 
@@ -403,7 +447,13 @@ export class AdminMetersPage implements OnInit {
       .subscribe({
         next: () => {
           this.toast.success('Οι αναγνώσεις αποθηκεύτηκαν.');
-          this.dirtyKeys.set(new Set());
+          this.dirtyKeys.update((keys) => {
+            const next = new Set(keys);
+            for (const key of next) {
+              if (key.startsWith(`${period}|`)) next.delete(key);
+            }
+            return next;
+          });
           this.reload();
         },
         error: () => this.toast.error('Η αποθήκευση απέτυχε.'),
@@ -413,6 +463,7 @@ export class AdminMetersPage implements OnInit {
   private reload(): void {
     const buildingId = this.buildingId;
     if (!buildingId) return;
+    this.loading.set(true);
     this.loadError.set(false);
     const period = this.period();
     forkJoin([
@@ -423,6 +474,7 @@ export class AdminMetersPage implements OnInit {
       .pipe(
         catchError(() => {
           this.loadError.set(true);
+          this.loading.set(false);
           return EMPTY;
         }),
       )
@@ -435,16 +487,19 @@ export class AdminMetersPage implements OnInit {
           for (const kind of this.kinds) {
             const cell = (row.cells as MatrixRow['cells'])[kind];
             if (cell?.value !== null && cell?.value !== undefined) {
-              grid[`${row.unitId}:${kind}`] = String(cell.value);
+              grid[meterReadingKey(period, row.unitId, kind)] = String(cell.value);
             }
           }
         }
-        // Keep in-flight edits when only refreshing consumption data.
+        // Keep in-flight edits for every period, not just the currently
+        // visible month. Switching periods must not move an edit to another
+        // billing cycle.
         const preserved: Record<string, string> = {};
         for (const key of this.dirtyKeys()) {
           preserved[key] = this.values()[key] ?? '';
         }
         this.values.set({ ...grid, ...preserved });
+        this.loading.set(false);
       });
   }
 }

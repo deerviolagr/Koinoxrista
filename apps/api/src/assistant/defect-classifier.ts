@@ -1,3 +1,5 @@
+import { redactPii } from './privacy';
+
 /**
  * Local Greek defect triage — deterministic keyword classifier (no LLM).
  * Maps free-text Greek descriptions to `trade` + `urgency` + `category` hints.
@@ -53,7 +55,10 @@ function scoreTrade(normalized: string, keywords: string[]): { score: number; hi
 }
 
 export function classifyDefectText(raw: string): DefectClassification {
-  const text = raw.trim();
+  // Classification is local, but callers may persist/display the returned
+  // hints alongside the report.  Normalize through the same PII boundary as
+  // the assistant prompt so identifiers never become part of a future field.
+  const text = redactPii(raw).trim();
   if (!text) {
     return { trade: 'Γενικά', urgency: 'low', categoryHint: 'Άλλο', keywords: [], confidence: 0 };
   }

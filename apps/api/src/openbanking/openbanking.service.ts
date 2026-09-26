@@ -7,7 +7,7 @@ import {
 import {
   BankConnection,
   ImportedTransaction,
-  PaymentStatus,
+  PaymentOrderState,
   Prisma,
 } from '@prisma/client';
 import {
@@ -161,7 +161,11 @@ export class OpenBankingService {
           remittanceInfo: tx.remittanceInfo ?? null,
         },
       });
-      if (!knownIds.has(tx.externalId)) newCount += 1;
+      // Count an id once even when a provider repeats it in one response.
+      if (!knownIds.has(tx.externalId)) {
+        knownIds.add(tx.externalId);
+        newCount += 1;
+      }
     }
 
     const suggestions = suggestMatches(
@@ -270,34 +274,104 @@ export class OpenBankingService {
         dateIso: dayIso(tx.bookedAt),
         amountCents: tx.amountCents,
         reference: tx.remittanceInfo ?? '',
+        ...(tx.currency ? { currency: tx.currency.toUpperCase() } : {}),
       }));
   }
 
   /**
-   * Minimal replica of `BankImportService.findPendingPayments` (that module
-   * does not export its service and is off-limits for modification).
+   * Pending checkout orders, rather than already-created Payment rows, are
+   * the candidates for bank reconciliation.  The bank-import service creates
+   * the PAID Payment only after a confirmed statement match.
    */
   private async findPendingPayments(
     buildingId: string,
   ): Promise<PendingBankPayment[]> {
-    const payments = await this.prisma.payment.findMany({
-      where: { status: PaymentStatus.PENDING, invoice: { buildingId } },
+    const prismaAny = this.prisma as unknown as Record<string, any>;
+    const orderDelegate = prismaAny.paymentOrder;
+    if (orderDelegate?.findMany) {
+      const orders = await orderDelegate.findMany({
+        where: {
+          status: PaymentOrderState.PENDING,
+          invoice: { buildingId },
+        },
+        orderBy: { createdAt: 'asc' },
+        select: {
+          id: true,
+          orderCode: true,
+          amountCents: true,
+          createdAt: true,
+          invoice: {
+            select: {
+              totalCents: true,
+              paidCents: true,
+              periodYearMonth: true,
+              unit: { select: { label: true } },
+              building: { select: { currency: true } },
+            },
+          },
+        },
+      });
+      return orders
+        .filter((order: any) => {
+          if (!(order.amountCents > 0)) return false;
+          if (
+            !Number.isFinite(order.invoice?.totalCents) ||
+            !Number.isFinite(order.invoice?.paidCents)
+          ) {
+            return true;
+          }
+          return (
+            order.amountCents ===
+            order.invoice.totalCents - order.invoice.paidCents
+          );
+        })
+        .map((order: any) => ({
+          paymentId: order.id,
+          amountCents: order.amountCents,
+          invoicePeriodYearMonth: order.invoice.periodYearMonth,
+          createdAtIso:
+            order.createdAt instanceof Date
+              ? order.createdAt.toISOString()
+              : new Date(order.createdAt).toISOString(),
+          unitLabel: order.invoice.unit?.label ?? '',
+          expectedReference: order.orderCode,
+          currency: (
+            order.currency ??
+            order.invoice.building?.currency ??
+            'EUR'
+          ).toUpperCase(),
+        }));
+    }
+
+    // Compatibility for older structural adapters without PaymentOrder.
+    const payments = await prismaAny.payment.findMany({
+      where: { status: 'PENDING', invoice: { buildingId } },
       orderBy: { createdAt: 'asc' },
       select: {
         id: true,
+        pspRef: true,
         amountCents: true,
         createdAt: true,
         invoice: {
-          select: { periodYearMonth: true, unit: { select: { label: true } } },
+          select: {
+            totalCents: true,
+            paidCents: true,
+            periodYearMonth: true,
+            unit: { select: { label: true } },
+          },
         },
       },
     });
-    return payments.map((payment) => ({
+    return payments.map((payment: any) => ({
       paymentId: payment.id,
       amountCents: payment.amountCents,
       invoicePeriodYearMonth: payment.invoice.periodYearMonth,
-      createdAtIso: payment.createdAt.toISOString(),
-      unitLabel: payment.invoice.unit.label,
+      createdAtIso:
+        payment.createdAt instanceof Date
+          ? payment.createdAt.toISOString()
+          : new Date(payment.createdAt).toISOString(),
+      unitLabel: payment.invoice.unit?.label ?? '',
+      expectedReference: payment.pspRef ?? payment.id,
     }));
   }
 

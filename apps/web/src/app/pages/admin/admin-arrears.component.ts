@@ -8,7 +8,7 @@ import {
 import { downloadBlob } from '../../core/api/http-download';
 import { ConfirmModalComponent } from '../../ui/confirm-modal.component';
 import { ToastService } from '../../ui/toast.service';
-import { formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 
 /** Aggregated stats for the arrears header (pure). */
 export function arrearsSummary(rows: ArrearsRow[]): {
@@ -183,9 +183,11 @@ export function bucketCls(cents: number): string {
 })
 export class AdminArrearsPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly toast = inject(ToastService);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
   protected readonly bucketCls = bucketCls;
 
   protected readonly report = signal<ArrearsReport | null>(null);

@@ -6,10 +6,7 @@ import {
 
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
-import {
-  SessionsService,
-  hashRefreshToken,
-} from './sessions.service';
+import { SessionsService, hashRefreshToken } from './sessions.service';
 
 function makePrisma() {
   return {
@@ -27,8 +24,6 @@ function makePrisma() {
 function makeAudit() {
   return { record: jest.fn() };
 }
-
-const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 describe('hashRefreshToken', () => {
   it('is stable and hex-encoded', () => {
@@ -56,11 +51,10 @@ describe('SessionsService', () => {
     it('stores the sha256 of the raw token with device meta', async () => {
       prisma.refreshSession.findFirst.mockResolvedValue(null);
 
-      service.record('user-1', 'raw-jwt', {
+      await service.record('user-1', 'raw-jwt', {
         userAgent: 'Mozilla/5.0',
         ip: '10.0.0.1',
       });
-      await flush();
 
       expect(prisma.refreshSession.create).toHaveBeenCalledWith({
         data: {
@@ -75,34 +69,33 @@ describe('SessionsService', () => {
     it('is idempotent for an already-tracked token', async () => {
       prisma.refreshSession.findFirst.mockResolvedValue({ id: 'existing' });
 
-      service.record('user-1', 'raw-jwt');
-      await flush();
+      await service.record('user-1', 'raw-jwt');
 
       expect(prisma.refreshSession.create).not.toHaveBeenCalled();
     });
 
-    it('swallows storage failures (auth must not break)', async () => {
+    it('propagates storage failures so auth fails closed', async () => {
       prisma.refreshSession.findFirst.mockRejectedValue(new Error('db down'));
 
-      service.record('user-1', 'raw-jwt');
-      await flush();
-
+      await expect(service.record('user-1', 'raw-jwt')).rejects.toThrow(
+        'db down',
+      );
       expect(prisma.refreshSession.create).not.toHaveBeenCalled();
     });
   });
 
   describe('rotate', () => {
-    it('re-points the previous session row onto the rotated token', async () => {
+    it('atomically re-points the previous live session row', async () => {
       prisma.refreshSession.updateMany.mockResolvedValue({ count: 1 });
 
-      service.rotate('user-1', 'old-jwt', 'new-jwt');
-      await flush();
+      await service.rotate('user-1', 'old-jwt', 'new-jwt');
 
-      expect(prisma.refreshSession.deleteMany).toHaveBeenCalledWith({
-        where: { tokenHash: hashRefreshToken('new-jwt') },
-      });
       expect(prisma.refreshSession.updateMany).toHaveBeenCalledWith({
-        where: { userId: 'user-1', tokenHash: hashRefreshToken('old-jwt') },
+        where: {
+          userId: 'user-1',
+          tokenHash: hashRefreshToken('old-jwt'),
+          revokedAt: null,
+        },
         data: {
           tokenHash: hashRefreshToken('new-jwt'),
           lastUsedAt: expect.any(Date),
@@ -111,15 +104,13 @@ describe('SessionsService', () => {
       expect(prisma.refreshSession.create).not.toHaveBeenCalled();
     });
 
-    it('starts tracking fresh when no predecessor exists', async () => {
+    it('fails closed when the predecessor is missing or already consumed', async () => {
       prisma.refreshSession.updateMany.mockResolvedValue({ count: 0 });
 
-      service.rotate('user-1', 'old-jwt', 'new-jwt');
-      await flush();
-
-      expect(prisma.refreshSession.create).toHaveBeenCalledWith({
-        data: { userId: 'user-1', tokenHash: hashRefreshToken('new-jwt') },
-      });
+      await expect(
+        service.rotate('user-1', 'old-jwt', 'new-jwt'),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(prisma.refreshSession.create).not.toHaveBeenCalled();
     });
   });
 
@@ -127,19 +118,37 @@ describe('SessionsService', () => {
     it('rejects refreshes of a revoked session', async () => {
       prisma.refreshSession.findFirst.mockResolvedValue({
         revokedAt: new Date(),
+        userId: 'user-1',
       });
 
-      await expect(service.assertNotRevoked('revoked-jwt')).rejects.toThrow(
-        UnauthorizedException,
-      );
+      await expect(
+        service.assertNotRevoked('revoked-jwt', 'user-1'),
+      ).rejects.toThrow(UnauthorizedException);
     });
 
-    it('allows untracked tokens (fail-open) and active sessions', async () => {
+    it('rejects untracked tokens and binds active sessions to the subject', async () => {
       prisma.refreshSession.findFirst.mockResolvedValueOnce(null);
-      await expect(service.assertNotRevoked('legacy-jwt')).resolves.toBeUndefined();
+      await expect(
+        service.assertNotRevoked('legacy-jwt', 'user-1'),
+      ).rejects.toThrow(UnauthorizedException);
 
-      prisma.refreshSession.findFirst.mockResolvedValueOnce({ revokedAt: null });
-      await expect(service.assertNotRevoked('live-jwt')).resolves.toBeUndefined();
+      prisma.refreshSession.findFirst.mockResolvedValueOnce({
+        revokedAt: null,
+        userId: 'another-user',
+      });
+      await expect(
+        service.assertNotRevoked('live-jwt', 'user-1'),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('allows an active session owned by the expected user', async () => {
+      prisma.refreshSession.findFirst.mockResolvedValue({
+        revokedAt: null,
+        userId: 'user-1',
+      });
+      await expect(
+        service.assertNotRevoked('live-jwt', 'user-1'),
+      ).resolves.toBeUndefined();
     });
   });
 

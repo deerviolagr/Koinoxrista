@@ -1,17 +1,32 @@
 import { waitForPortOpen } from '@nx/node/utils';
 
+import { API_HOST, API_PORT, apiUrl } from './config';
+
 /* eslint-disable */
 var __TEARDOWN_MESSAGE__: string;
 
-module.exports = async function () {
-  // Start services that that the app needs to run (e.g. database, docker-compose, etc.).
-  console.log('\nSetting up...\n');
+module.exports = async function globalSetup() {
+  console.log('\nSetting up API E2E dependencies...\n');
+  await waitForPortOpen(API_PORT, { host: API_HOST, retries: 60, retryDelay: 1_000 });
 
-  const host = process.env.HOST ?? 'localhost';
-  const port = process.env.PORT ? Number(process.env.PORT) : 3000;
-  await waitForPortOpen(port, { host });
-
-  // Hint: Use `globalThis` to pass variables to global teardown.
-  (globalThis as { __TEARDOWN_MESSAGE__?: string }).__TEARDOWN_MESSAGE__ =
-    '\nTearing down...\n';
+  const healthUrl = apiUrl('/');
+  const deadline = Date.now() + 30_000;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(healthUrl);
+      if (response.ok) {
+        (globalThis as { __TEARDOWN_MESSAGE__?: string }).__TEARDOWN_MESSAGE__ =
+          '\nAPI E2E dependencies are ready.\n';
+        return;
+      }
+      lastError = new Error(`health check returned ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(
+    `API did not become ready at ${healthUrl}: ${String(lastError)}`,
+  );
 };

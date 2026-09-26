@@ -66,6 +66,7 @@ describe('JwtStrategy / JwtAuthGuard', () => {
       email: 'resident01@demo.gr',
       role: Role.RESIDENT,
       buildingId: 'building-1',
+      status: 'ACTIVE',
     });
     expect(prisma.user.findUnique).toHaveBeenCalledWith({
       where: { id: 'user-1' },
@@ -85,6 +86,7 @@ describe('JwtStrategy / JwtAuthGuard', () => {
       email: 'resident01@demo.gr',
       role: Role.ADMIN,
       buildingId: 'building-2',
+      status: 'ACTIVE',
     });
   });
 

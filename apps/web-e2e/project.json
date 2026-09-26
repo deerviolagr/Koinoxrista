@@ -4,6 +4,43 @@
   "projectType": "application",
   "sourceRoot": "apps/web-e2e/src",
   "implicitDependencies": ["web"],
-  "// targets": "to see all targets run: nx show project web-e2e --web",
-  "targets": {}
+  "targets": {
+    "e2e": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "inputs": [
+        "default",
+        "^production",
+        "{workspaceRoot}/apps/web-e2e/playwright.config.mts",
+        { "externalDependencies": ["@playwright/test"] }
+      ],
+      "outputs": [
+        "{workspaceRoot}/dist/.playwright/apps/web-e2e/test-output",
+        "{workspaceRoot}/dist/.playwright/apps/web-e2e/playwright-report"
+      ],
+      "options": {
+        "cwd": "apps/web-e2e",
+        "command": "pnpm exec playwright test --config=playwright.config.mts"
+      }
+    },
+    "e2e-ci": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "inputs": [
+        "default",
+        "^production",
+        "{workspaceRoot}/apps/web-e2e/playwright.config.mts",
+        { "externalDependencies": ["@playwright/test"] }
+      ],
+      "outputs": [
+        "{workspaceRoot}/dist/.playwright/apps/web-e2e/test-output",
+        "{workspaceRoot}/dist/.playwright/apps/web-e2e/playwright-report"
+      ],
+      "options": {
+        "cwd": "apps/web-e2e",
+        "command": "pnpm exec playwright test --config=playwright.config.mts",
+        "env": { "CI": "true" }
+      }
+    }
+  }
 }

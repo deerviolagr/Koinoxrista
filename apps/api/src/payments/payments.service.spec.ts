@@ -58,9 +58,14 @@ function makeTx(invoice = invoiceRow()) {
     invoice: {
       findUnique: jest.fn().mockResolvedValue(invoice),
       update: jest.fn().mockResolvedValue({}),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     payment: { create: jest.fn().mockResolvedValue({}) },
-    paymentOrder: { update: jest.fn().mockResolvedValue({}) },
+    paymentOrder: {
+      update: jest.fn().mockResolvedValue({}),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      findUnique: jest.fn().mockResolvedValue(null),
+    },
   };
 }
 
@@ -81,7 +86,12 @@ function makePrisma(tx = makeTx()) {
         })),
       findUnique: jest.fn(),
       findFirst: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
       update: jest.fn().mockResolvedValue({}),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    },
+    payment: {
+      findFirst: jest.fn().mockResolvedValue(null),
     },
     $transaction: jest.fn(async (fn: (client: unknown) => Promise<void>) =>
       fn(tx),
@@ -284,6 +294,8 @@ describe('PaymentsService.handleMercadoPagoWebhook', () => {
     mercadopago = {
       createCheckout: jest.fn(),
       getPaymentStatus: jest.fn(),
+      isMock: false,
+      isAvailable: true,
     };
     service = new PaymentsService(
       prisma as unknown as PrismaService,
@@ -299,13 +311,24 @@ describe('PaymentsService.handleMercadoPagoWebhook', () => {
     prisma.paymentOrder.findFirst = jest.fn().mockResolvedValue({
       id: 'order-mp',
       orderCode: 'pref-mp-1',
+      sessionRef: 'pref-mp-1',
+      paymentRef: 'pay-123',
+      pspRef: 'pay-123',
+      provider: 'mercadopago',
+      currency: 'BRL',
       invoiceId: 'invoice-1',
       amountCents: 8_000,
       status: PaymentOrderState.PENDING,
     });
     mercadopago.getPaymentStatus = jest
       .fn()
-      .mockResolvedValue({ status: 'COMPLETED', externalReference: 'invoice-1' });
+      .mockResolvedValue({
+        status: 'COMPLETED',
+        externalReference: 'invoice-1',
+        preferenceId: 'pref-mp-1',
+        amountCents: 8_000,
+        currency: 'BRL',
+      });
 
     await expect(
       service.handleMercadoPagoWebhook({
@@ -321,16 +344,26 @@ describe('PaymentsService.handleMercadoPagoWebhook', () => {
         amountCents: 8_000,
       }),
     });
-    expect(prisma.__tx.paymentOrder.update).toHaveBeenCalledWith({
-      where: { id: 'order-mp' },
-      data: { status: PaymentOrderState.COMPLETED },
-    });
+    expect(prisma.__tx.paymentOrder.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: 'order-mp',
+          status: PaymentOrderState.PENDING,
+        }),
+        data: expect.objectContaining({ status: PaymentOrderState.COMPLETED }),
+      }),
+    );
   });
 
   it('does not settle when the PSP status is not COMPLETED', async () => {
     prisma.paymentOrder.findFirst = jest.fn().mockResolvedValue({
       id: 'order-mp',
       orderCode: 'pref-mp-1',
+      sessionRef: 'pref-mp-1',
+      paymentRef: 'pay-123',
+      pspRef: 'pay-123',
+      provider: 'mercadopago',
+      currency: 'BRL',
       invoiceId: 'invoice-1',
       amountCents: 8_000,
       status: PaymentOrderState.PENDING,
@@ -352,13 +385,24 @@ describe('PaymentsService.handleMercadoPagoWebhook', () => {
     prisma.paymentOrder.findFirst = jest.fn().mockResolvedValue({
       id: 'order-mp',
       orderCode: 'pref-mp-1',
+      sessionRef: 'pref-mp-1',
+      paymentRef: 'pay-123',
+      pspRef: 'pay-123',
+      provider: 'mercadopago',
+      currency: 'BRL',
       invoiceId: 'invoice-1',
       amountCents: 8_000,
       status: PaymentOrderState.COMPLETED,
     });
     mercadopago.getPaymentStatus = jest
       .fn()
-      .mockResolvedValue({ status: 'COMPLETED', externalReference: 'invoice-1' });
+      .mockResolvedValue({
+        status: 'COMPLETED',
+        externalReference: 'invoice-1',
+        preferenceId: 'pref-mp-1',
+        amountCents: 8_000,
+        currency: 'BRL',
+      });
 
     await expect(
       service.handleMercadoPagoWebhook({
@@ -461,14 +505,14 @@ describe('PaymentsService.handleWebhook', () => {
       amountCents: 8_000,
       status: PaymentOrderState.PENDING,
     });
-    adapter.getOrderStatus = jest.fn().mockResolvedValue('PENDING');
+    adapter.getOrderStatus = jest.fn().mockResolvedValue('FAILED');
 
     await expect(service.handleWebhook({ orderCode: 'OC-1' })).resolves.toEqual(
       { ok: false },
     );
     expect(adapter.getOrderStatus).toHaveBeenCalledWith('OC-1');
-    expect(prisma.paymentOrder.update).toHaveBeenCalledWith({
-      where: { id: 'order-1' },
+    expect(prisma.paymentOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: 'order-1', status: PaymentOrderState.PENDING },
       data: { status: PaymentOrderState.FAILED },
     });
     expect(prisma.$transaction).not.toHaveBeenCalled();
@@ -488,25 +532,30 @@ describe('PaymentsService.handleWebhook', () => {
     ).resolves.toEqual({ ok: true });
 
     expect(prisma.__tx.payment.create).toHaveBeenCalledWith({
-      data: {
+      data: expect.objectContaining({
         invoiceId: 'invoice-1',
         method: PaymentMethod.CARD,
         pspRef: 'TX-9',
         amountCents: 8_000,
         status: PaymentStatus.PAID,
-      },
+      }),
     });
-    expect(prisma.__tx.invoice.update).toHaveBeenCalledWith({
-      where: { id: 'invoice-1' },
+    expect(prisma.__tx.invoice.updateMany).toHaveBeenCalledWith({
+      where: { id: 'invoice-1', paidCents: { lte: 2_000 } },
       data: {
         paidCents: { increment: 8_000 },
         status: PaymentStatus.PAID,
       },
     });
-    expect(prisma.__tx.paymentOrder.update).toHaveBeenCalledWith({
-      where: { id: 'order-1' },
-      data: { status: PaymentOrderState.COMPLETED },
-    });
+    expect(prisma.__tx.paymentOrder.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: 'order-1',
+          status: PaymentOrderState.PENDING,
+        }),
+        data: expect.objectContaining({ status: PaymentOrderState.COMPLETED }),
+      }),
+    );
   });
 
   it('keeps the invoice PENDING when the payment only partially settles it', async () => {
@@ -525,8 +574,8 @@ describe('PaymentsService.handleWebhook', () => {
       { ok: true },
     );
 
-    expect(prisma.__tx.invoice.update).toHaveBeenCalledWith({
-      where: { id: 'invoice-1' },
+    expect(prisma.__tx.invoice.updateMany).toHaveBeenCalledWith({
+      where: { id: 'invoice-1', paidCents: { lte: 15_000 } },
       data: {
         paidCents: { increment: 5_000 },
         status: PaymentStatus.PENDING,

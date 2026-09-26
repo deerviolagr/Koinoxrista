@@ -1,7 +1,15 @@
-import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
-import { EMPTY, catchError, forkJoin, map } from 'rxjs';
-import { VoteChoice } from '@org/shared';
-import { BuildingsApiService } from '../../core/api/buildings-api.service';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  OnDestroy,
+  OnInit,
+  inject,
+  signal,
+} from '@angular/core';
+import { EMPTY, catchError, forkJoin, map, of } from 'rxjs';
+import { VoteChoice, VoteOutcome, VoteTally } from '@org/shared';
+import { AuthService } from '../../core/auth.service';
+import { RealtimeService } from '../../core/realtime.service';
 import {
   VoteDetail,
   VoteListItem,
@@ -21,14 +29,33 @@ export function myChoice(detail: VoteDetail | undefined): VoteChoice | null {
   return ballots[ballots.length - 1].choice;
 }
 
+interface VoteRealtimeEvent {
+  voteId: string;
+  ballotsCount?: number;
+  tally?: VoteTally;
+  outcome?: VoteOutcome;
+}
+
 const CHOICE_BUTTONS: {
   choice: VoteChoice;
   label: string;
   cls: string;
 }[] = [
-  { choice: 'YES', label: 'ΘΕΤΙΚΟ', cls: 'bg-green-600 text-white hover:bg-green-500' },
-  { choice: 'NO', label: 'ΑΡΝΗΤΙΚΟ', cls: 'bg-red-600 text-white hover:bg-red-500' },
-  { choice: 'ABSTAIN', label: 'ΑΠΟΧΗ', cls: 'bg-slate-200 text-slate-700 hover:bg-slate-300' },
+  {
+    choice: 'YES',
+    label: 'ΘΕΤΙΚΟ',
+    cls: 'bg-green-600 text-white hover:bg-green-500',
+  },
+  {
+    choice: 'NO',
+    label: 'ΑΡΝΗΤΙΚΟ',
+    cls: 'bg-red-600 text-white hover:bg-red-500',
+  },
+  {
+    choice: 'ABSTAIN',
+    label: 'ΑΠΟΧΗ',
+    cls: 'bg-slate-200 text-slate-700 hover:bg-slate-300',
+  },
 ];
 
 @Component({
@@ -50,7 +77,10 @@ const CHOICE_BUTTONS: {
           <div class="card flex flex-col gap-3">
             <div class="flex items-start justify-between gap-2">
               <h2 class="font-semibold text-slate-900">{{ vote.topic }}</h2>
-              <span class="badge shrink-0" [class]="statusBadge(vote.status).cls">
+              <span
+                class="badge shrink-0"
+                [class]="statusBadge(vote.status).cls"
+              >
                 {{ statusBadge(vote.status).label }}
               </span>
             </div>
@@ -58,7 +88,8 @@ const CHOICE_BUTTONS: {
               <p class="text-sm text-slate-600">{{ vote.description }}</p>
             }
             <p class="text-xs text-slate-500">
-              {{ thresholdLabel(vote.thresholdType) }} · {{ closesLabel(vote.closesAt) }}
+              {{ thresholdLabel(vote.thresholdType) }} ·
+              {{ closesLabel(vote.closesAt) }}
             </p>
             <p class="text-xs text-slate-500">Ψήφοι: {{ vote.ballotsCount }}</p>
 
@@ -66,7 +97,8 @@ const CHOICE_BUTTONS: {
               @if (details()[vote.id]; as d) {
                 @if (myChoice(d); as chosen) {
                   <p class="text-sm text-green-700">
-                    ✓ Έχετε ψηφίσει: {{ choiceLabel(chosen) }} — μπορείτε να αλλάξετε μέχρι το κλείσιμο.
+                    ✓ Έχετε ψηφίσει: {{ choiceLabel(chosen) }} — μπορείτε να
+                    αλλάξετε μέχρι το κλείσιμο.
                   </p>
                 }
               }
@@ -76,7 +108,9 @@ const CHOICE_BUTTONS: {
                     type="button"
                     class="rounded-lg px-2 py-2 text-sm font-semibold transition-colors"
                     [class]="btn.cls"
-                    [class.opacity-100]="myChoice(details()[vote.id]) === btn.choice"
+                    [class.opacity-100]="
+                      myChoice(details()[vote.id]) === btn.choice
+                    "
                     [class.ring-2.ring-offset-1.ring-slate-900]="
                       myChoice(details()[vote.id]) === btn.choice
                     "
@@ -104,9 +138,10 @@ const CHOICE_BUTTONS: {
     }
   `,
 })
-export class ResidentVotesPage implements OnInit {
-  private readonly buildingsApi = inject(BuildingsApiService);
+export class ResidentVotesPage implements OnInit, OnDestroy {
+  private readonly auth = inject(AuthService);
   private readonly votesApi = inject(VotesApiService);
+  private readonly realtime = inject(RealtimeService);
   private readonly toast = inject(ToastService);
   private readonly analytics = inject(AnalyticsService);
 
@@ -126,24 +161,24 @@ export class ResidentVotesPage implements OnInit {
   private buildingId: string | null = null;
 
   ngOnInit(): void {
-    this.buildingsApi
-      .mine()
-      .pipe(
-        catchError(() => {
-          this.error.set(true);
-          this.loading.set(false);
-          return EMPTY;
-        }),
-      )
-      .subscribe((building) => {
-        this.buildingId = building.id;
-        this.reload();
-      });
+    this.buildingId = this.auth.currentUser()?.buildingId ?? null;
+    this.realtime.on<VoteRealtimeEvent>('vote.updated', this.onVoteUpdated);
+    this.realtime.on<VoteRealtimeEvent>('vote.closed', this.onVoteClosed);
+    this.reload();
+  }
+
+  ngOnDestroy(): void {
+    this.realtime.off<VoteRealtimeEvent>('vote.updated', this.onVoteUpdated);
+    this.realtime.off<VoteRealtimeEvent>('vote.closed', this.onVoteClosed);
   }
 
   protected reload(): void {
     const buildingId = this.buildingId;
-    if (!buildingId) return;
+    if (!buildingId) {
+      this.error.set(true);
+      this.loading.set(false);
+      return;
+    }
     this.loading.set(true);
     this.error.set(false);
     this.votesApi
@@ -167,15 +202,17 @@ export class ResidentVotesPage implements OnInit {
     forkJoin(
       voteIds.map((id) =>
         this.votesApi.detail(id).pipe(
-          catchError(() => EMPTY),
+          catchError(() => of(null)),
           map((detail) => [id, detail] as const),
         ),
       ),
     ).subscribe((pairs) => {
-      this.details.update((current) => ({
-        ...current,
-        ...Object.fromEntries(pairs),
-      }));
+      const loaded = Object.fromEntries(
+        pairs.filter(
+          (pair): pair is readonly [string, VoteDetail] => pair[1] !== null,
+        ),
+      );
+      this.details.update((current) => ({ ...current, ...loaded }));
     });
   }
 
@@ -205,12 +242,70 @@ export class ResidentVotesPage implements OnInit {
       .pipe(catchError(() => EMPTY))
       .subscribe((detail) => {
         this.details.update((current) => ({ ...current, [voteId]: detail }));
-        const votes = this.votes().map((v) =>
-          v.id === voteId ? { ...detail.vote } : v,
+        const votes = this.votes().map((vote) =>
+          vote.id === voteId ? { ...vote, ...detail } : vote,
         );
         this.votes.set(votes);
       });
   }
+
+  private readonly onVoteUpdated = (event: VoteRealtimeEvent): void => {
+    this.votes.update((votes) =>
+      votes.map((vote) =>
+        vote.id === event.voteId
+          ? {
+              ...vote,
+              ...(event.ballotsCount !== undefined
+                ? { ballotsCount: event.ballotsCount }
+                : {}),
+            }
+          : vote,
+      ),
+    );
+    const detail = this.details()[event.voteId];
+    if (!detail) {
+      this.refreshDetail(event.voteId);
+      return;
+    }
+    this.details.update((current) => ({
+      ...current,
+      [event.voteId]: {
+        ...detail,
+        ...(event.ballotsCount !== undefined
+          ? { ballotsCount: event.ballotsCount }
+          : {}),
+        ...(event.tally ? { tally: event.tally } : {}),
+      },
+    }));
+  };
+
+  private readonly onVoteClosed = (event: VoteRealtimeEvent): void => {
+    this.votes.update((votes) =>
+      votes.map((vote) =>
+        vote.id === event.voteId
+          ? {
+              ...vote,
+              status: 'CLOSED',
+              ...(event.outcome ? { result: event.outcome } : {}),
+            }
+          : vote,
+      ),
+    );
+    const detail = this.details()[event.voteId];
+    if (detail) {
+      this.details.update((current) => ({
+        ...current,
+        [event.voteId]: {
+          ...detail,
+          status: 'CLOSED',
+          ...(event.outcome ? { result: event.outcome } : {}),
+          ...(event.tally ? { tally: event.tally } : {}),
+        },
+      }));
+    } else {
+      this.refreshDetail(event.voteId);
+    }
+  };
 
   protected choiceLabel(choice: VoteChoice): string {
     switch (choice) {

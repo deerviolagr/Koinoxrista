@@ -1,12 +1,18 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  OnDestroy,
   computed,
   effect,
   inject,
   signal,
 } from '@angular/core';
-import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import {
+  Router,
+  RouterLink,
+  RouterLinkActive,
+  RouterOutlet,
+} from '@angular/router';
 import { EMPTY, catchError } from 'rxjs';
 import { Role } from '@org/shared';
 import { AuthService } from '../core/auth.service';
@@ -15,6 +21,7 @@ import {
   NotificationDto,
 } from '../core/notification-api.service';
 import { RealtimeService } from '../core/realtime.service';
+import { LocaleSelectorComponent } from '../core/locale-selector.component';
 import { TranslatePipe } from '../core/translate.pipe';
 
 interface NavLink {
@@ -79,7 +86,10 @@ const NAV_GROUPS: Record<Role, NavGroup[]> = {
   ACCOUNTANT: [
     {
       label: null,
-      links: [{ path: '/accountant', label: 'nav.accountant' }],
+      links: [
+        { path: '/accountant', label: 'nav.accountant', exact: true },
+        { path: '/settings/security', label: 'settings.security' },
+      ],
     },
   ],
   RESIDENT: [
@@ -88,16 +98,21 @@ const NAV_GROUPS: Record<Role, NavGroup[]> = {
       links: [
         { path: '/balance', label: 'nav.balance' },
         { path: '/balance/statement', label: 'nav.statement' },
+        { path: '/balance/plan', label: 'nav.paymentPlans' },
         { path: '/votes', label: 'nav.votes' },
         { path: '/feed', label: 'nav.feed' },
         { path: '/defects', label: 'nav.defects' },
+        { path: '/settings/security', label: 'settings.security' },
       ],
     },
   ],
   PROVIDER: [
     {
       label: null,
-      links: [{ path: '/provider', label: 'nav.provider' }],
+      links: [
+        { path: '/provider', label: 'nav.provider', exact: true },
+        { path: '/settings/security', label: 'settings.security' },
+      ],
     },
   ],
   // Feature 6: 理事長 — superset of the classic ADMIN nav.
@@ -152,13 +167,21 @@ const NAV_GROUPS: Record<Role, NavGroup[]> = {
     {
       label: 'nav.platform',
       links: [
-        { path: '/admin/billing', label: 'nav.billing' },
-        { path: '/admin/partners', label: 'nav.partners' },
-        { path: '/admin/referrals', label: 'nav.referrals' },
+        { path: '/platform/billing', label: 'nav.billing' },
+        { path: '/platform/partners', label: 'nav.partners' },
+        { path: '/platform/referrals', label: 'nav.referrals' },
+        { path: '/settings/security', label: 'settings.security' },
       ],
     },
   ],
 };
+
+export function notificationRoute(linkPath: string, role: Role | null): string {
+  if (linkPath !== '/jobs') return linkPath;
+  if (role === 'ADMIN' || role === 'BUILDING_OWNER') return '/admin/jobs';
+  if (role === 'PROVIDER') return '/provider';
+  return linkPath;
+}
 
 export function formatTimeAgo(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -176,7 +199,13 @@ export function formatTimeAgo(iso: string): string {
 
 @Component({
   selector: 'app-layout',
-  imports: [RouterOutlet, RouterLink, RouterLinkActive, TranslatePipe],
+  imports: [
+    RouterOutlet,
+    RouterLink,
+    RouterLinkActive,
+    TranslatePipe,
+    LocaleSelectorComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     '(document:click)': 'onDocumentClick($event)',
@@ -193,11 +222,21 @@ export function formatTimeAgo(iso: string): string {
             (click)="menuOpen.set(!menuOpen())"
             [attr.aria-label]="'menu.open' | translate"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-5 w-5">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              class="h-5 w-5"
+            >
               <path d="M4 6h16M4 12h16M4 18h16" stroke-linecap="round" />
             </svg>
           </button>
-          <a routerLink="/" class="text-lg font-bold tracking-tight text-slate-900">
+          <a
+            routerLink="/"
+            class="text-lg font-bold tracking-tight text-slate-900"
+          >
             PolykatoikiaOS
           </a>
         </div>
@@ -216,6 +255,7 @@ export function formatTimeAgo(iso: string): string {
               }
             </select>
           }
+          <app-locale-selector />
           <span class="hidden text-sm text-slate-500 sm:inline">
             {{ auth.currentUser()?.email }}
           </span>
@@ -263,10 +303,14 @@ export function formatTimeAgo(iso: string): string {
                         class="mt-1.5 h-2 w-2 shrink-0 rounded-full"
                         [class.bg-slate-900]="!item.readAt"
                         [class.bg-transparent]="!!item.readAt"
-                        [attr.aria-label]="item.readAt ? '' : ('nav.unread' | translate)"
+                        [attr.aria-label]="
+                          item.readAt ? '' : ('nav.unread' | translate)
+                        "
                       ></span>
                       <span class="min-w-0 flex-1">
-                        <span class="block truncate text-sm font-bold text-slate-900">
+                        <span
+                          class="block truncate text-sm font-bold text-slate-900"
+                        >
                           {{ item.title }}
                         </span>
                         <span class="block truncate text-xs text-slate-500">
@@ -283,7 +327,9 @@ export function formatTimeAgo(iso: string): string {
                     </p>
                   }
                 </div>
-                <div class="flex items-center justify-between border-t border-slate-200 px-3 py-2">
+                <div
+                  class="flex items-center justify-between border-t border-slate-200 px-3 py-2"
+                >
                   <button
                     type="button"
                     class="text-xs font-medium text-slate-700 hover:underline"
@@ -325,7 +371,9 @@ export function formatTimeAgo(iso: string): string {
           @for (group of groups(); track group.label) {
             <div class="flex flex-col gap-1">
               @if (group.label) {
-                <p class="px-3 pb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                <p
+                  class="px-3 pb-1 text-xs font-semibold uppercase tracking-wide text-slate-400"
+                >
                   {{ group.label | translate }}
                 </p>
               }
@@ -353,7 +401,7 @@ export function formatTimeAgo(iso: string): string {
     </div>
   `,
 })
-export class LayoutComponent {
+export class LayoutComponent implements OnDestroy {
   protected readonly auth = inject(AuthService);
   private readonly router = inject(Router);
   private readonly notificationApi = inject(NotificationApiService);
@@ -374,6 +422,25 @@ export class LayoutComponent {
   );
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly onNotification = (event: {
+    type: string;
+    title: string;
+    body: string | null;
+    linkPath: string | null;
+  }): void => {
+    const item: NotificationDto = {
+      id: `live-${Date.now()}`,
+      type: event.type,
+      title: event.title,
+      body: event.body ?? '',
+      linkPath: event.linkPath ?? null,
+      readAt: null,
+      createdAt: new Date().toISOString(),
+    };
+    this.notifications.update((items) => [item, ...items].slice(0, 30));
+    this.unreadCount.update((count) => count + 1);
+    void this.refreshNotifications();
+  };
 
   constructor() {
     this.auth
@@ -383,31 +450,16 @@ export class LayoutComponent {
 
     // Live notifications: push an incoming one to the top and bump the badge;
     // the 60s poll stays as a fallback for missed events.
-    this.realtime.on<{
-      type: string;
-      title: string;
-      body: string | null;
-      linkPath: string | null;
-    }>('notification.created', (event) => {
-      const item: NotificationDto = {
-        id: `live-${Date.now()}`,
-        type: event.type,
-        title: event.title,
-        body: event.body ?? '',
-        linkPath: event.linkPath ?? null,
-        readAt: null,
-        createdAt: new Date().toISOString(),
-      };
-      this.notifications.update((items) => [item, ...items].slice(0, 30));
-      this.unreadCount.update((count) => count + 1);
-      void this.refreshNotifications();
-    });
+    this.realtime.on('notification.created', this.onNotification);
 
     effect(() => {
       const loggedIn = this.auth.currentUser() !== null;
       if (loggedIn && !this.pollTimer) {
         void this.refreshNotifications();
-        this.pollTimer = setInterval(() => void this.refreshNotifications(), 60_000);
+        this.pollTimer = setInterval(
+          () => void this.refreshNotifications(),
+          60_000,
+        );
       } else if (!loggedIn && this.pollTimer) {
         clearInterval(this.pollTimer);
         this.pollTimer = null;
@@ -416,6 +468,12 @@ export class LayoutComponent {
         this.notifOpen.set(false);
       }
     });
+  }
+
+  ngOnDestroy(): void {
+    this.realtime.off('notification.created', this.onNotification);
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    this.pollTimer = null;
   }
 
   protected toggleNotifications(): void {
@@ -432,7 +490,11 @@ export class LayoutComponent {
         .subscribe(() => this.applyRead(item.id));
     }
     this.notifOpen.set(false);
-    if (item.linkPath) void this.router.navigateByUrl(item.linkPath);
+    if (item.linkPath) {
+      void this.router.navigateByUrl(
+        notificationRoute(item.linkPath, this.auth.role),
+      );
+    }
   }
 
   protected markAllRead(): void {
@@ -460,12 +522,16 @@ export class LayoutComponent {
   protected onSwitchBuilding(event: Event): void {
     const buildingId = (event.target as HTMLSelectElement).value;
     if (!buildingId || buildingId === this.activeBuildingId()) return;
-    this.auth.switchBuilding(buildingId).subscribe(() => location.reload());
+    this.auth
+      .switchBuilding(buildingId)
+      .pipe(catchError(() => EMPTY))
+      .subscribe(() => window.location.reload());
   }
 
   protected logout(): void {
-    this.auth.logout();
-    void this.router.navigateByUrl('/login');
+    this.auth.logout().subscribe(() => {
+      void this.router.navigateByUrl('/login');
+    });
   }
 
   private refreshNotifications(): void {

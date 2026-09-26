@@ -2,7 +2,12 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 
 import type { AuthenticatedUser } from '../auth/auth.types';
 import { PrismaService } from '../prisma/prisma.service';
-import { PDF_CONTENT_TYPE, PdfService } from './pdf.service';
+import {
+  PDF_CONTENT_TYPE,
+  PdfService,
+  formatPdfMoney,
+  resolvePdfSettings,
+} from './pdf.service';
 
 type PrismaMock = {
   invoice: {
@@ -57,6 +62,21 @@ function buildService(prisma: Partial<PrismaMock>): PdfService {
   return new PdfService(prisma as unknown as PrismaService);
 }
 
+describe('PDF money settings', () => {
+  it('uses the building market currency and locale, including zero-decimal currencies', () => {
+    expect(resolvePdfSettings({ market: 'CL', currency: 'CLP' })).toEqual({
+      currency: 'CLP',
+      locale: 'es-CL',
+    });
+    expect(formatPdfMoney(1235, { currency: 'JPY', locale: 'en-US' })).toContain(
+      '1,235',
+    );
+    expect(formatPdfMoney(1235, { currency: 'JPY', locale: 'en-US' })).not.toContain(
+      '.00',
+    );
+  });
+});
+
 describe('PdfService', () => {
   it('renders a non-empty PDF for an invoice the admin may fetch', async () => {
     const prisma: PrismaMock = {
@@ -70,7 +90,7 @@ describe('PdfService', () => {
     const file = await service.invoicePdf('invoice-1', admin());
 
     expect(file.contentType).toBe(PDF_CONTENT_TYPE);
-    expect(file.filename).toBe('seikyu-2026-08-A1.pdf');
+    expect(file.filename).toBe('invoice-2026-08-A1.pdf');
     expect(file.body.length).toBeGreaterThan(500);
     expect(file.body.subarray(0, 5).toString('latin1')).toBe('%PDF-');
   });

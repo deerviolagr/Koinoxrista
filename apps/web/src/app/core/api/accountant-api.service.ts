@@ -25,6 +25,8 @@ export interface AccountantBuildingDto {
   buildingId: string;
   name: string;
   address: string;
+  /** ISO-4217 currency; expected from newer API builds, EUR fallback otherwise. */
+  currency?: string;
 }
 
 export interface ApologismosCategoryTotal {
@@ -60,6 +62,7 @@ export interface ApologismosUnitBalance {
 export interface ApologismosDto {
   buildingId: string;
   buildingName: string;
+  currency?: string;
   year: string;
   generatedAt: string;
   incomeByCategory: ApologismosCategoryTotal[];

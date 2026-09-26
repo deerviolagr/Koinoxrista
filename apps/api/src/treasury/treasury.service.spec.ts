@@ -25,6 +25,7 @@ const otherAdmin: AuthenticatedUser = {
 function makePrisma() {
   const tx = {
     treasuryEntry: {
+      findFirst: jest.fn(),
       create: jest.fn(),
     },
     treasuryAccount: {
@@ -40,6 +41,7 @@ function makePrisma() {
       update: jest.fn(),
     },
     treasuryEntry: {
+      findFirst: jest.fn(),
       findMany: jest.fn().mockResolvedValue([]),
       count: jest.fn().mockResolvedValue(0),
       create: jest.fn(),
@@ -351,5 +353,36 @@ describe('TreasuryService — balance', () => {
     await expect(service.getBalance('building-2', otherAdmin)).resolves.toEqual(
       expect.objectContaining({ totalCents: 0 }),
     );
+  });
+
+  it('includes the complete end of a date-only to filter', async () => {
+    const prisma = makePrisma();
+    prisma.treasuryAccount.findFirst.mockResolvedValue({ id: 'acc-1', buildingId: 'building-1' });
+    const service = new TreasuryService(prisma as unknown as PrismaService, auditStub());
+
+    await service.listEntries('building-1', admin, { to: '2026-12-31' });
+    const where = prisma.treasuryEntry.findMany.mock.calls[0][0].where;
+    expect(where.createdAt.lte.toISOString()).toBe('2026-12-31T23:59:59.999Z');
+  });
+
+  it('returns the existing entry for an idempotent reference retry', async () => {
+    const prisma = makePrisma();
+    prisma.treasuryAccount.findFirst.mockResolvedValue({ id: 'acc-1', buildingId: 'building-1' });
+    const tx = (prisma as any).__tx;
+    tx.treasuryEntry.findFirst.mockResolvedValue({
+      id: 'entry-existing', accountId: 'acc-1', buildingId: 'building-1',
+      amountCents: 500, direction: 'IN', method: 'BANK', reference: 'receipt-1',
+    });
+    const service = new TreasuryService(prisma as unknown as PrismaService, auditStub());
+
+    await expect(
+      service.createEntry(
+        'building-1',
+        { accountId: 'acc-1', amountCents: 500, direction: 'IN', method: 'BANK', reference: 'receipt-1' },
+        admin,
+      ),
+    ).resolves.toMatchObject({ id: 'entry-existing' });
+    expect(tx.treasuryEntry.create).not.toHaveBeenCalled();
+    expect(tx.treasuryAccount.update).not.toHaveBeenCalled();
   });
 });

@@ -27,7 +27,7 @@ export class CommissionsController {
   constructor(private readonly commissions: CommissionsService) {}
 
   @Get('buildings/:buildingId/commissions')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   list(
     @Param('buildingId') buildingId: string,
     @Query() query: ListCommissionsQueryDto,
@@ -37,7 +37,7 @@ export class CommissionsController {
   }
 
   @Get('buildings/:buildingId/commissions/summary')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   summary(
     @Param('buildingId') buildingId: string,
     @Query('year', new DefaultValuePipe(new Date().getUTCFullYear()), ParseIntPipe)
@@ -48,13 +48,13 @@ export class CommissionsController {
   }
 
   @Post('commissions/:id/mark-paid')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   markPaid(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
     return this.commissions.markPaid(id, user);
   }
 
   @Post('commissions/:id/waive')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   waive(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
     return this.commissions.waive(id, user);
   }

@@ -1,3 +1,4 @@
+export * from './lib/money';
 export * from './lib/audit';
 export * from './lib/bank';
 export * from './lib/building';

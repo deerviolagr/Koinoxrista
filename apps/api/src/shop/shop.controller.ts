@@ -158,7 +158,7 @@ export class ShopController {
     @Param('id') id: string,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.shopService.markPaid(id, user);
+    return this.shopService.markPaid(buildingId, id, user);
   }
 
   @Get('orders')

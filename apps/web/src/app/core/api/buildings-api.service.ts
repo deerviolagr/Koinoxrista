@@ -69,8 +69,17 @@ export class BuildingsApiService {
 
   updateSettings(
     buildingId: string,
-    dto: { invoiceRegistrationNo?: string; market?: string; currency?: string; pspProvider?: string },
+    dto: {
+      /** null explicitly clears the optional registration number. */
+      invoiceRegistrationNo?: string | null;
+      market?: string;
+      currency?: string;
+      pspProvider?: string;
+    },
   ): Observable<Building> {
-    return this.http.patch<Building>(`${this.base}/${buildingId}/settings`, dto);
+    return this.http.patch<Building>(
+      `${this.base}/${buildingId}/settings`,
+      dto,
+    );
   }
 }

@@ -6,6 +6,7 @@ import {
   inject,
   signal,
 } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { EMPTY, catchError, forkJoin } from 'rxjs';
 import type {
@@ -22,11 +23,11 @@ import {
   legalStatusBadgeClass,
   legalStatusLabel,
 } from '@org/shared';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 import { BuildingsApiService } from '../../core/api/buildings-api.service';
 import { LegalApiService } from '../../core/api/legal-api.service';
 import { UnitsApiService, UnitWithOwners } from '../../core/api/units-api.service';
 import { ToastService } from '../../ui/toast.service';
-import { formatEuros } from '../../ui/format';
 import { HttpClient } from '@angular/common/http';
 import { environment } from '../../../environments/environment';
 
@@ -148,12 +149,20 @@ function eventBadgeClass(type: string): string {
         </select>
       </div>
       <button type="button" class="btn btn-secondary" (click)="reload()">Ανανέωση</button>
+     @if (caseLoadError()) {
+       <span class="text-xs text-red-700">Αποτυχία φόρτωσης λεπτομερειών.</span>
+     }
     </div>
 
     @if (loading()) {
       <div class="card text-sm text-slate-500">Φόρτωση…</div>
     } @else if (loadError()) {
-      <div class="card border-red-200 bg-red-50 text-sm text-red-700">Αποτυχία φόρτωσης υποθέσεων.</div>
+      <div class="card border-red-200 bg-red-50 text-sm text-red-700">
+        <p>Αποτυχία φόρτωσης υποθέσεων.</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="loadBuilding()">
+          Δοκιμή ξανά
+        </button>
+      </div>
     } @else {
       <div class="card overflow-x-auto p-0">
         <table class="data-table">
@@ -359,8 +368,10 @@ export class AdminLegalPage implements OnInit {
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
   private readonly http = inject(HttpClient);
+  private readonly money = inject(AdminMoneyService);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
   protected readonly stageLabel = legalStageLabel;
   protected readonly stageBadge = legalStageBadgeClass;
   protected readonly statusLabel = legalStatusLabel;
@@ -380,6 +391,7 @@ export class AdminLegalPage implements OnInit {
   protected readonly filterStage = signal('');
   protected readonly filterStatus = signal('');
   protected readonly selected = signal<LegalCaseDto | null>(null);
+  protected readonly caseLoadError = signal(false);
   protected readonly exodikHtml = signal<string | null>(null);
   protected readonly showCreate = signal(false);
   protected readonly createSubmitted = signal(false);
@@ -399,6 +411,11 @@ export class AdminLegalPage implements OnInit {
     notes: [''],
   });
 
+  private readonly createUnitValue = toSignal(
+    this.createForm.controls.unitId.valueChanges,
+    { initialValue: this.createForm.controls.unitId.value },
+  );
+
   protected readonly noteForm = this.fb.nonNullable.group({
     note: ['', [Validators.required, Validators.minLength(1)]],
   });
@@ -408,7 +425,7 @@ export class AdminLegalPage implements OnInit {
   });
 
   protected readonly createUnitInvoices = computed(() => {
-    const unitId = this.createForm.controls.unitId.value;
+    const unitId = this.createUnitValue();
     if (!unitId) return [];
     return this.allInvoices()
       .filter((inv) => inv.unitId === unitId && inv.totalCents - inv.paidCents > 0)
@@ -427,9 +444,22 @@ export class AdminLegalPage implements OnInit {
   private buildingId: string | null = null;
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    if (this.loading() && this.buildingId) return;
+    this.loading.set(true);
+    this.loadError.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.reload();
@@ -492,10 +522,14 @@ export class AdminLegalPage implements OnInit {
   protected openCase(c: LegalCaseDto): void {
     // fetch fresh with events
     if (!this.buildingId) return;
-    this.legalApi
-      .getCase(this.buildingId, c.id)
-      .pipe(catchError(() => EMPTY))
-      .subscribe((fresh) => this.selected.set(fresh));
+    this.caseLoadError.set(false);
+    this.legalApi.getCase(this.buildingId, c.id).subscribe({
+      next: (fresh) => this.selected.set(fresh),
+      error: () => {
+        this.caseLoadError.set(true);
+        this.toast.error('Η φόρτωση της υπόθεσης απέτυχε.');
+      },
+    });
   }
 
   protected closeCase(): void {
@@ -670,7 +704,12 @@ export class AdminLegalPage implements OnInit {
     if (!this.buildingId) return;
     this.legalApi
       .getStats(this.buildingId)
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          return EMPTY;
+        }),
+      )
       .subscribe((stats) => this.stats.set(stats));
   }
 
@@ -682,7 +721,13 @@ export class AdminLegalPage implements OnInit {
       arrears: this.buildingsApi.arrears(buildingId),
       invoices: this.http.get<InvoiceLite[]>(`${environment.apiUrl}/buildings/${buildingId}/invoices`),
     })
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe(({ units, arrears, invoices }) => {
         this.units.set(units);
         this.arrearsMap.set(new Map(arrears.rows.map((r) => [r.unitId, r.outstandingCents])));

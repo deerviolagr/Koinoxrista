@@ -32,7 +32,7 @@ export class BuildingAssetsController {
   constructor(private readonly maintenanceService: MaintenanceService) {}
 
   @Get()
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   listAssets(
     @Param('buildingId') buildingId: string,
     @Query('category') category: string | undefined,
@@ -42,7 +42,7 @@ export class BuildingAssetsController {
   }
 
   @Post()
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   createAsset(
     @Param('buildingId') buildingId: string,
     @Body() dto: CreateAssetDto,
@@ -52,7 +52,7 @@ export class BuildingAssetsController {
   }
 
   @Patch(':id')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   updateAsset(
     @Param('buildingId') buildingId: string,
     @Param('id') id: string,
@@ -63,7 +63,7 @@ export class BuildingAssetsController {
   }
 
   @Delete(':id')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   deleteAsset(
     @Param('buildingId') buildingId: string,
     @Param('id') id: string,
@@ -80,7 +80,7 @@ export class MaintenanceController {
   constructor(private readonly maintenanceService: MaintenanceService) {}
 
   @Get('schedules')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   listSchedules(
     @Param('buildingId') buildingId: string,
     @Query('upcomingDays') upcomingDays: string | undefined,
@@ -91,7 +91,7 @@ export class MaintenanceController {
   }
 
   @Post('schedules')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   createSchedule(
     @Param('buildingId') buildingId: string,
     @Body() dto: CreateScheduleDto,
@@ -101,7 +101,7 @@ export class MaintenanceController {
   }
 
   @Patch('schedules/:id')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   updateSchedule(
     @Param('buildingId') buildingId: string,
     @Param('id') id: string,
@@ -112,7 +112,7 @@ export class MaintenanceController {
   }
 
   @Delete('schedules/:id')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   deleteSchedule(
     @Param('buildingId') buildingId: string,
     @Param('id') id: string,
@@ -122,7 +122,7 @@ export class MaintenanceController {
   }
 
   @Post('schedules/:id/done')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   markDone(
     @Param('buildingId') buildingId: string,
     @Param('id') id: string,
@@ -133,7 +133,7 @@ export class MaintenanceController {
   }
 
   @Post('generate-jobs')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   generateJobs(
     @Param('buildingId') buildingId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -142,7 +142,7 @@ export class MaintenanceController {
   }
 
   @Get('calendar')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   getCalendar(
     @Param('buildingId') buildingId: string,
     @Query('from') from: string | undefined,

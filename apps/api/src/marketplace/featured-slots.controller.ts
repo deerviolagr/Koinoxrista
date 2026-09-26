@@ -26,7 +26,7 @@ export class FeaturedSlotsController {
   constructor(private readonly featuredSlots: FeaturedSlotsService) {}
 
   @Get('buildings/:buildingId/featured-slots')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   list(
     @Param('buildingId') buildingId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -35,7 +35,7 @@ export class FeaturedSlotsController {
   }
 
   @Post('buildings/:buildingId/featured-slots')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   create(
     @Param('buildingId') buildingId: string,
     @Body() dto: CreateFeaturedSlotDto,
@@ -45,7 +45,7 @@ export class FeaturedSlotsController {
   }
 
   @Delete('buildings/:buildingId/featured-slots/:id')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   remove(
     @Param('buildingId') buildingId: string,
     @Param('id') id: string,

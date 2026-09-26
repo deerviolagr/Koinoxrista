@@ -7,6 +7,11 @@ import type {
 } from '@org/shared';
 
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  effectiveBuildingRole,
+  isAdminLikeRole,
+} from '../common/tenant';
+import type { AuthenticatedUser } from '../auth/auth.types';
 
 interface ProfileWithUser {
   userId: string;
@@ -77,7 +82,14 @@ export class ProvidersService {
     return sortFeaturedFirst(items);
   }
 
-  async detail(userId: string, callerRole: Role): Promise<ProviderDetailDto> {
+  async detail(
+    userId: string,
+    callerRole: Role | null | undefined,
+    caller?: AuthenticatedUser,
+  ): Promise<ProviderDetailDto> {
+    const effectiveCallerRole = caller?.buildingId
+      ? await effectiveBuildingRole(this.prisma, caller, caller.buildingId)
+      : callerRole;
     const profile = await this.prisma.providerProfile.findUnique({
       where: { userId },
       include: {
@@ -98,7 +110,7 @@ export class ProvidersService {
     return {
       ...item,
       contact:
-        callerRole === Role.ADMIN
+        isAdminLikeRole(effectiveCallerRole)
           ? { phone: profile.user.phone, email: profile.user.email }
           : null,
     };

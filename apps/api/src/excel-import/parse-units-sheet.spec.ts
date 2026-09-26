@@ -186,7 +186,7 @@ describe('parseUnitsSheet', () => {
     expect(result.rows[0].errors).toHaveLength(2);
     expect(result.rows[0].millimes).toBeNull();
     expect(result.rows[1].errors).toEqual([
-      'Τα χιλιοστά πρέπει να είναι ακέραιος από 0 έως 10000.',
+      'Τα χιλιοστά πρέπει να είναι ακέραιος από 1 έως 1000.',
     ]);
     expect(result.rows[3]).toMatchObject({
       label: 'Δ1',
@@ -234,7 +234,7 @@ describe('parseUnitsSheet', () => {
     expect(result.validCount).toBe(1);
     expect(result.rows[0]).toMatchObject({ floor: -1, radiatorCount: 0 });
     expect(result.rows[1].errors).toEqual([
-      'Τα χιλιοστά πρέπει να είναι ακέραιος από 0 έως 10000.',
+      'Τα χιλιοστά πρέπει να είναι ακέραιος από 1 έως 1000.',
     ]);
   });
 

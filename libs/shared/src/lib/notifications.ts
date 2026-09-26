@@ -6,9 +6,16 @@ export const NOTIFICATION_TYPES = [
   'bid.received',
   'bid.accepted',
   'worklog.added',
+  'compliance.expiring',
+  'arrears.reminder',
+  'maintenance.due',
+  'kpi.anomaly',
+  'assistant.reply',
 ] as const;
 
-export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
+export type KnownNotificationType = (typeof NOTIFICATION_TYPES)[number];
+/** Modules may add a type without breaking older clients. */
+export type NotificationType = KnownNotificationType | (string & {});
 
 /**
  * Payload delivered to service workers via the Web Push protocol.
@@ -16,20 +23,29 @@ export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
  */
 export interface PushPayload {
   title: string;
-  body?: string;
-  url?: string;
+  body?: string | null;
+  url?: string | null;
+  icon?: string;
+  badge?: string;
+  tag?: string;
 }
 
 /** In-app notification inbox entry; `readAt` null = unread. Dates are ISO strings. */
 export interface NotificationDto {
   id: string;
   userId: string;
-  type: NotificationType | string;
+  type: NotificationType;
   title: string;
   body?: string | null;
   linkPath?: string | null;
   readAt: string | null;
   createdAt: string;
+}
+
+export interface NotificationListQueryDto {
+  unread?: boolean;
+  skip?: number;
+  take?: number;
 }
 
 /** GET /notifications response page. */
@@ -48,4 +64,8 @@ export interface SubscribePushDto {
   endpoint: string;
   p256dh: string;
   auth: string;
+}
+
+export interface UnsubscribePushDto {
+  endpoint: string;
 }

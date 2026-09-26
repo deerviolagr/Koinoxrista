@@ -4,6 +4,7 @@
   "license": "MIT",
   "scripts": {},
   "private": true,
+  "packageManager": "pnpm@10.34.5",
   "prisma": {
     "seed": "ts-node -P prisma/tsconfig.seed.json prisma/seed.ts"
   },

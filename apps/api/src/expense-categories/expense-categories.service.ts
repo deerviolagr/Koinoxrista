@@ -1,9 +1,14 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { AllocationStrategy } from '@prisma/client';
 
 import { AuthenticatedUser } from '../auth/auth.types';
 import { assertSameBuilding } from '../common/tenant';
 import { PrismaService } from '../prisma/prisma.service';
+import { assertSupportedAllocationStrategy } from '../expenses/allocation-weights';
 import { CreateExpenseCategoryDto } from './dto/create-expense-category.dto';
 
 @Injectable()
@@ -16,13 +21,22 @@ export class ExpenseCategoriesService {
     user: AuthenticatedUser,
   ) {
     assertSameBuilding(user, buildingId);
+    const strategy = dto.strategy ?? AllocationStrategy.MILIMES;
+    // There is no persisted custom weight map.  Reject CUSTOM (and any
+    // unknown strategy) before creating a category that can never be billed.
+    try {
+      assertSupportedAllocationStrategy(strategy);
+    } catch (error) {
+      if (error instanceof BadRequestException) throw error;
+      throw new BadRequestException('Unsupported allocation strategy');
+    }
     await this.requireBuilding(buildingId);
 
     return this.prisma.expenseCategory.create({
       data: {
         buildingId,
         name: dto.name,
-        strategy: dto.strategy ?? AllocationStrategy.MILIMES,
+        strategy,
       },
     });
   }

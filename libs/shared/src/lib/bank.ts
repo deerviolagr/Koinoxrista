@@ -1,3 +1,5 @@
+import type { CurrencyCode } from './money';
+
 export type BankMatchConfidence = 'high' | 'medium' | 'low';
 
 /** One incoming credit parsed from a bank-statement CSV export. */
@@ -5,6 +7,7 @@ export interface ParsedBankRowDto {
   /** Statement date in `YYYY-MM-DD` form. */
   dateIso: string;
   amountCents: number;
+  currency?: CurrencyCode;
   reference: string;
 }
 

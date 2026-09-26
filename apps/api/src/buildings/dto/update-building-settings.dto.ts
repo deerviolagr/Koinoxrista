@@ -1,14 +1,22 @@
-import { IsIn, IsOptional, IsString, Matches } from 'class-validator';
-import { MARKET_CODES } from '@org/shared';
-
-const PSP_PROVIDERS = ['viva', 'stripejp', 'stripe', 'mercadopago', 'gmo'] as const;
-const CURRENCIES = ['EUR', 'USD', 'CAD', 'MXN', 'BRL', 'ARS', 'CLP', 'COP', 'PEN', 'GBP', 'PLN', 'SEK', 'CZK'] as const;
+import {
+  IsIn,
+  IsOptional,
+  IsString,
+  Matches,
+  ValidateIf,
+} from 'class-validator';
+import {
+  CURRENCY_CODES,
+  MARKET_CODES,
+  PSP_PROVIDERS,
+} from '@org/shared';
 
 export class UpdateBuildingSettingsDto {
   /**
-   * Japan 適格請求書 registration number: `T` followed by 13 digits.
-   * e.g. `T1234567890123`.
+   * Market-specific tax registration identifier. An empty string explicitly
+   * clears the value; the service owns cross-market compatibility checks.
    */
+  @ValidateIf((_object, value) => value !== '')
   @IsOptional()
   @IsString()
   @Matches(/^T[0-9]{13}$/, {
@@ -17,14 +25,14 @@ export class UpdateBuildingSettingsDto {
   invoiceRegistrationNo?: string;
 
   @IsOptional()
-  @IsIn([...MARKET_CODES])
+  @IsIn(MARKET_CODES)
   market?: string;
 
   @IsOptional()
-  @IsIn([...CURRENCIES])
+  @IsIn(CURRENCY_CODES)
   currency?: string;
 
   @IsOptional()
-  @IsIn([...PSP_PROVIDERS])
+  @IsIn(PSP_PROVIDERS)
   pspProvider?: string;
 }

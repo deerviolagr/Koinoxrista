@@ -381,7 +381,7 @@ describe('buildAttendanceStats (quorum math)', () => {
     expect(stats.quorumMet).toBe(true);
   });
 
-  it('applies the stricter line for MILLIMES_MAJORITY votes', () => {
+  it('uses the inclusive 50% line for MILLIMES_MAJORITY votes', () => {
     const atHalf = buildAttendanceStats('MILLIMES_MAJORITY', units, [
       { unitId: 'u1', present: true },
       { unitId: 'u2', present: false },
@@ -395,7 +395,7 @@ describe('buildAttendanceStats (quorum math)', () => {
     const exactlyHalf = buildAttendanceStats('MILLIMES_MAJORITY', strictUnits, [
       { unitId: 'a', present: true },
     ]);
-    expect(exactlyHalf.quorumMet).toBe(false);
+    expect(exactlyHalf.quorumMet).toBe(true);
 
     const justOver = buildAttendanceStats('MILLIMES_MAJORITY', strictUnits, [
       { unitId: 'a', present: true },

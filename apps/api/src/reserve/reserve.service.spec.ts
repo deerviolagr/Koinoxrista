@@ -495,7 +495,7 @@ describe('ReserveService — levies', () => {
     ).rejects.toThrow(BadRequestException);
   });
 
-  it('issueLevy marks ISSUED, creates reserve contributions per share, increments balance and audits', async () => {
+  it('issueLevy marks the receivable ISSUED without creating reserve cash', async () => {
     const prisma = makePrisma();
     const audit = auditStub();
     const service = new ReserveService(
@@ -531,21 +531,14 @@ describe('ReserveService — levies', () => {
 
     const issued = await service.issueLevy('building-1', 'levy-1', admin);
     expect(issued.status).toBe('ISSUED');
-    expect(tx.reserveContribution.create).toHaveBeenCalledTimes(2);
-    expect(tx.reserveContribution.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ source: 'LEVY', levyId: 'levy-1' }),
-      }),
-    );
-    expect(tx.reserveFund.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { balanceCents: { increment: 2000 } } }),
-    );
+    expect(tx.reserveContribution.create).not.toHaveBeenCalled();
+    expect(tx.reserveFund.update).not.toHaveBeenCalled();
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'reserve.levy.issued' }),
     );
   });
 
-  it('issueLevy rejects non-DRAFT status', async () => {
+  it('issueLevy rejects a non-DRAFT levy', async () => {
     const prisma = makePrisma();
     prisma.extraordinaryLevy.findFirst.mockResolvedValue({
       id: 'levy-1',
@@ -629,5 +622,85 @@ describe('ReserveService — levies', () => {
     await expect(
       service.createLevy('building-1', { title: 'Test', totalCents: 1000, strategy: 'UNITS' }, admin),
     ).rejects.toThrow(BadRequestException);
+  });
+
+  it('collects a LEVY into cash only after allocating the receivable', async () => {
+    const prisma = makePrisma();
+    prisma.extraordinaryLevy.findFirst.mockResolvedValue({
+      id: 'levy-1',
+      buildingId: 'building-1',
+      title: 'Repair',
+      status: 'ISSUED',
+      shares: [{ id: 'share-1', unitId: 'u1', amountCents: 1000, paidCents: 0 }],
+    });
+    prisma.reserveFund.findUnique.mockResolvedValue({
+      id: 'fund-1', buildingId: 'building-1', balanceCents: 0,
+    });
+    const tx = (prisma as any).__tx;
+    tx.levyShare.updateMany = jest.fn().mockResolvedValue({ count: 1 });
+    tx.reserveContribution.create.mockResolvedValue({ id: 'collection-1' });
+    tx.reserveFund.update.mockResolvedValue({ id: 'fund-1', balanceCents: 1000 });
+
+    const service = new ReserveService(
+      prisma as unknown as PrismaService,
+      auditStub(),
+    );
+    await service.contribute(
+      'building-1',
+      { amountCents: 1000, source: 'LEVY', levyId: 'levy-1' },
+      admin,
+    );
+
+    expect(tx.levyShare.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'share-1', paidCents: { lte: 0 } }),
+        data: { paidCents: { increment: 1000 } },
+      }),
+    );
+    expect(tx.reserveFund.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { balanceCents: { increment: 1000 } } }),
+    );
+  });
+
+  it('allows only one concurrent drawdown to claim the same balance', async () => {
+    const prisma = makePrisma();
+    prisma.reserveFund.findUnique.mockResolvedValue({
+      id: 'fund-1', buildingId: 'building-1', balanceCents: 1000,
+    });
+    const tx = (prisma as any).__tx;
+    tx.reserveFund.findUnique.mockResolvedValue({
+      id: 'fund-1', balanceCents: 1000,
+    });
+    tx.reserveFund.updateMany = jest
+      .fn()
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 });
+    tx.reserveDrawdown.create.mockResolvedValue({ id: 'drawdown-1' });
+
+    const service = new ReserveService(
+      prisma as unknown as PrismaService,
+      auditStub(),
+    );
+    const results = await Promise.allSettled([
+      service.drawdown('building-1', { amountCents: 600, reason: 'one' }, admin),
+      service.drawdown('building-1', { amountCents: 600, reason: 'two' }, admin),
+    ]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+  });
+
+  it('does not close an issued levy with outstanding shares', async () => {
+    const prisma = makePrisma();
+    prisma.extraordinaryLevy.findFirst.mockResolvedValue({
+      id: 'levy-1', buildingId: 'building-1', status: 'ISSUED',
+      shares: [{ amountCents: 1000, paidCents: 400 }],
+    });
+    const service = new ReserveService(
+      prisma as unknown as PrismaService,
+      auditStub(),
+    );
+    await expect(service.closeLevy('building-1', 'levy-1', admin)).rejects.toThrow(
+      BadRequestException,
+    );
   });
 });

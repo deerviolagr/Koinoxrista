@@ -71,9 +71,11 @@ function makePrisma() {
       deleteMany: undefined,
     },
     ballot: {
-      findMany: jest.fn().mockResolvedValue([
-        { choice: 'NAI', vote: { topic: 'Ανελκυστήρας' } },
-      ]),
+      findMany: jest
+        .fn()
+        .mockResolvedValue([
+          { choice: 'NAI', vote: { topic: 'Ανελκυστήρας' } },
+        ]),
       deleteMany: undefined,
     },
     unit: { deleteMany: undefined },
@@ -154,6 +156,8 @@ describe('GdprService', () => {
       expect(updateData.firstName).toBe('Ανώνυμος');
       expect(updateData.lastName).toBe('Ανώνυμος');
       expect(updateData.phone).toBeNull();
+      expect(updateData.status).toBe('DISABLED');
+      expect(updateData.buildingId).toBeNull();
       expect(updateData.passwordHash).toMatch(/^[0-9a-f]{64}$/);
       expect(tx.user.update).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: 'user-1' } }),
@@ -199,6 +203,57 @@ describe('GdprService', () => {
       // deleteMany no-ops instead of throwing P2025 like delete would.
       expect(tx.membership.deleteMany).toHaveBeenCalledTimes(1);
       expect(tx.providerProfile.deleteMany).toHaveBeenCalledTimes(1);
+    });
+    it('revokes refresh sessions and API keys and removes push subscriptions', async () => {
+      const revokeTx = {
+        user: {
+          findUniqueOrThrow: jest.fn().mockResolvedValue({
+            email: 'maria@demo.gr',
+            buildingId: 'building-1',
+          }),
+          update: jest.fn().mockResolvedValue({}),
+        },
+        membership: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
+        providerProfile: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+        },
+        refreshSession: {
+          updateMany: jest.fn().mockResolvedValue({ count: 2 }),
+        },
+        apiKey: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+        pushSubscription: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 3 }),
+        },
+        twoFactorRecoveryCode: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 10 }),
+        },
+        emailVerification: {
+          deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        gdprRequest: { create: jest.fn().mockResolvedValue({}) },
+      };
+      const revokePrisma = {
+        $transaction: jest.fn((fn: (value: typeof revokeTx) => unknown) =>
+          fn(revokeTx),
+        ),
+      };
+      const revokeService = new GdprService(
+        revokePrisma as unknown as PrismaService,
+      );
+
+      await revokeService.deleteAccount('user-1');
+
+      expect(revokeTx.refreshSession.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1', revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+      expect(revokeTx.apiKey.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1', revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+      expect(revokeTx.pushSubscription.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+      });
     });
   });
 });

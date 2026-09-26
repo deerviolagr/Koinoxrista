@@ -17,16 +17,17 @@
 
 | Plan item | Status in code | Evidence / gap |
 |---|---|---|
-| `LLM_PROVIDER` routing (auto/openai/anthropic/openai-compatible + console mock) | ✅ Done | `apps/api/src/assistant/llm-provider.ts:19-238` — `createLlmProvider()` with explicit-provider switch and graceful console fallback |
-| `AI_LOCAL_ONLY` flag | ✅ Done | `llm-provider.ts:201` gates hosted providers (openai/anthropic disabled when true) |
-| `.env.example` vars | ✅ Done | `LLM_PROVIDER`, `LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL`, `AI_LOCAL_ONLY`, `AI_TOKEN_BUDGET_PER_BUILDING` all present |
+| `LLM_PROVIDER` routing (auto/openai/anthropic/openai-compatible + console mock) | ✅ Done | `apps/api/src/assistant/llm-provider.ts` — explicit provider selection, hosted-provider gating, local URL validation, and timeout-bounded fetch |
+| `AI_LOCAL_ONLY` flag | ✅ Partial hardening | Hosted providers are blocked; OpenAI-compatible URLs are accepted only for loopback/private local endpoints, and all provider requests have a hard timeout. The allowlist is intentionally conservative. |
+| `.env.example` vars | 🟡 Partial | `LLM_PROVIDER`, `LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL`, `AI_LOCAL_ONLY`, and `LLM_TIMEOUT_MS` are used by the provider; `AI_TOKEN_BUDGET_PER_BUILDING` is still only documented |
 | `AI_TOKEN_BUDGET_PER_BUILDING` enforcement | ❌ **Gap** | Env var exists but **no code reads it** — only `.env.example` and this doc reference it. No monthly counter, no budget check, no fallback trigger. |
-| Greek RAG copilot (#1) | 🟡 Partial | `assistant.service.ts` does `buildingId`-scoped keyword-overlap retrieval (top-5 announcements + static FAQ chunk). **No embeddings/pgvector** — retrieval is lexical only. `assets/faq.el.md` exists. |
+| Greek RAG copilot (#1) | 🟡 Partial | `assistant.service.ts` does `buildingId`-scoped keyword-overlap retrieval (top-5 announcements + static FAQ chunk). Context and questions are PII-redacted and bounded; **no embeddings/pgvector** are present. `assets/faq.el.md` exists. |
 | Supplier invoice OCR (#2) | 🟡 Partial | `supplier-invoices/ocr.service.ts` is a **stub** ("Not a real OCR engine"), not Tesseract `ell`. `POST /import-pdf` + confirm/match flow exist; `issuerAfm`/VAT parsing present. |
 | Arrears forecast (#3) | 🟡 Partial | `kpi.service.ts:257 forecastArrears()` exists (local tabular model, `kpi.forecast.spec.ts` green) but plan's 5-feature logistic regression + weekly scheduler wiring not built. `BuildingWeeklySnapshot` upsert exists (`kpi.service.ts:79`). |
 | πρακτικό auto-draft (#4) | 🟡 Partial | `assembly/praktiko-draft.spec.ts` exists — structured praktiko + LLM draft + disclaimer. Publishing flow needs wiring. |
 | Defect triage (#5) | 🟡 Partial | `assistant/defect-classifier.ts` is a **keyword classifier**, not the LLM few-shot classifier the plan describes. `jobs` `RESIDENT_REPORT`→`ADMIN_RFP` convert flow exists (`jobs.service.ts:555`). |
-| NL→SQL copilot (#10), myDATA error translator (#8), voice (#9) | ❌ Not started | As planned. |
+| NL→SQL copilot (#10) | ❌ Unavailable by design | The old `$queryRawUnsafe` seam is not registered and now fails closed. It must be replaced by a parameterized, allowlisted read-only implementation before exposure. |
+| myDATA error translator (#8), voice (#9) | ❌ Not started | Planned follow-ups; neither is represented as a working local model pipeline. |
 | pgvector | ❌ **Gap** | Zero occurrences in `apps/api` code or migrations — embeddings not stored. Plan assumes pgvector exists. |
 
 ---
@@ -51,7 +52,8 @@ LLM_MODEL=meltemi:7b              # or llama3.1:8b
 EMBEDDING_MODEL=bge-m3
 EMBEDDING_API_URL=http://localhost:11434/api/embed
 PGVECTOR_ENABLED=true
-AI_LOCAL_ONLY=true               # new: never call hosted LLM when true (Greek default)
+AI_LOCAL_ONLY=true               # never call hosted LLM; compatible URLs must be local
+LLM_TIMEOUT_MS=15000             # hard per-request timeout
 AI_TOKEN_BUDGET_PER_BUILDING=50000 # monthly token cap, graceful fallback to FAQ
 ```
 
@@ -120,24 +122,24 @@ AI_TOKEN_BUDGET_PER_BUILDING=50000 # monthly token cap, graceful fallback to FAQ
 ```
 [ Angular `money.pipe` / `i18n es/el` ] ──
                                            ├─▶ NestJS `assistant` guard (buildingId scope)
-[ Postgres pgvector | Building data ] ─────┼─▶ `llm-provider` router
-                                           │      ├─ ollama (Meltemi 7B)  ──┐
-                                           │      └─ openai/anthropic (fallback, AI_LOCAL_ONLY=false)
+[ Postgres building data ] ────────────────┼─▶ `llm-provider` router (timeout + local-only URL guard)
+                                           │      ├─ local compatible endpoint (explicitly local)
+                                           │      └─ hosted providers only when AI_LOCAL_ONLY=false
                                            └─▶ `audit` hash chain + `kpi` snapshots
 ```
 
-- **Tenant isolation:** every vector row carries `buildingId`; `retrieve()` adds `WHERE buildingId = $1`. E2e asserts cross-building 403.
-- **PII redaction:** before LLM: `user{email,phone} → unitLabel` map in `assistant.service.ts:retrieve()`.
-- **Fallback:** token budget exceeded or Ollama down → `console` mock → FAQ links (already in `llm-provider.ts` `catch`).
+- **Tenant isolation:** retrieval is `buildingId`-scoped keyword filtering today; an embedding/vector store is not present yet. E2e cross-building isolation remains a required follow-up.
+- **PII redaction:** questions, retrieved titles/bodies, and classifier hints pass through bounded redaction before prompts/responses; no raw context is logged.
+- **Fallback:** provider errors/timeouts or a refused remote URL → `console` placeholder → FAQ links. Token-budget accounting is not implemented.
 - **Observability:** `Sentry` for `LlmProvider` errors, `JobRun` ledger for `kpi/forecast` and `assembly/praktiko` drafts.
 
 ---
 
 ## 4. Greek Data & Compliance
 
-- **Sources to embed per building:** `Announcement` (pinned first), `ComplianceItem` (`Ν.4756/2020`), `ExpenseCategory` strategy notes (`Θέρμανση ανά καλοριφέρ`, `Ανελκυστήρας ανά όροφο`), static `assets/legal/n1221_1981.el.md`.
-- **GDPR:** Embeddings are derived data; deletion via `POST /api/gdpr/delete-me` anonymizes vectors for that `userId`. Vectors live in EU Postgres, covered by existing `gdpr` module and `docs/RUNBOOK.md` RPO≤24h.
-- **Evaluation harness (Greek):** 50-question golden set per building type (12-unit sample `seed.ts`): `χιλιοστά` math, ` myDATA` timeline, `εκοινο` deadlines. CI runs `pnpm nx test api --testPathPattern=assistant` with Meltemi vs Llama switch.
+- **Sources to embed per building:** `Announcement` (pinned first), `ComplianceItem` (`Ν.4756/2020`), `ExpenseCategory` strategy notes (`Θέρμανση ανά καλοριφέρ`, `Ανελκυστήρας ανά όροφο`), static `assets/legal/n1221_1981.el.md`. These are lexical sources today; embedding them requires a future schema/store.
+- **GDPR:** current assistant paths do not create embeddings. If an embedding store is added, deletion/anonymization and retention must be implemented before enabling it; do not treat the existing `gdpr` module as vector coverage.
+- **Evaluation harness (Greek):** the 50-question golden set is a staging/external QA artifact, not a default CI result. The local Jest tests cover routing, redaction, timeouts, and deterministic classification only.
 
 ---
 
@@ -145,9 +147,9 @@ AI_TOKEN_BUDGET_PER_BUILDING=50000 # monthly token cap, graceful fallback to FAQ
 
 | Phase | Weeks | Scope | Exit criteria |
 |---|---|---|---|
-| **A: Local foundation** | 1–4 | Ollama + Meltemi 7B on staging VPS, `pgvector` migration, `assistant` RAG top-k=5 with Greek FAQ, `AI_LOCAL_ONLY` flag | `POST /assistant/query` `buildingId`-scoped, Greek answers cite sources, `pnpm nx test api` green, no hosted calls when `AI_LOCAL_ONLY=true` |
+| **A: Local foundation** | 1–4 | Ollama/Meltemi on staging VPS, lexical `assistant` RAG top-k=5 with Greek FAQ, `AI_LOCAL_ONLY` URL guard/timeouts | `POST /assistant/query` is building-scoped and local-only routing is tested; pgvector/embeddings and hosted/local model QA remain external follow-ups |
 | **B: Greek document triage** | 5–10 | Supplier OCR (Tesseract `ell`), defect triage classifier, `explainInvoice` NL | Photo → `issuerAfm` parse 90% on 20 Greek samples; defect `Υδραυλικά` classifier F1>0.85 |
-| **C: Ops copilot** | 11–18 | `πρακτικό` draft, arrears forecast (tabular), NL→SQL SELECT-only + audit, Greek SMS drafting | Admin creates minutes from a closed vote in 1 click; forecast API returns `riskUnits` sorted; NL→SQL audited, 10/day limit enforced |
+| **C: Ops copilot** | 11–18 | `πρακτικό` draft, tabular arrears forecast, **unregistered** NL→SQL placeholder, Greek SMS drafting | Draft/forecast can be tested locally; NL→SQL remains unavailable until a parameterized allowlisted read-only implementation replaces the unsafe raw-SQL seam |
 | **D: Voice + hardening** | 19–24 | `whisper.cpp` Greek, myDATA error translator, token budget + `kpi` alert wiring, load test 20 concurrent queries on 8GB box | P95 < 2s for RAG query on CPX31; budget fallback tested; `sentry` dashboards for `assistant.*` |
 
 ---
@@ -181,7 +183,7 @@ AI_TOKEN_BUDGET_PER_BUILDING=50000 # monthly token cap, graceful fallback to FAQ
 
 ## 9. Immediate Next Steps (this sprint)
 
-> Updated 2026-08-31 after codebase audit — see §0b for what's already built vs missing.
+> Updated 2026-09-24 after codebase audit — see §0b for what's implemented, partial, or unavailable.
 
 1. **Enforce `AI_TOKEN_BUDGET_PER_BUILDING`** — env var exists but nothing reads it. Add a monthly per-building counter (Prisma model or in-memory + DB), check before each LLM call, degrade to FAQ links on breach. Tests: budget exceeded → FAQ fallback, budget reset.
 2. **pgvector migration + embedding pipeline** — zero pgvector code exists. Add `CREATE EXTENSION vector`, an `EmbeddingChunk` model (buildingId + chunk text + vector column), BGE-M3 embedder via Ollama `/api/embed`, and swap `assistant.service.ts` keyword scoring for cosine retrieval behind a feature flag. Tenant filter: every vector row carries `buildingId`, `retrieve()` adds `WHERE buildingId = $1`.
@@ -190,4 +192,4 @@ AI_TOKEN_BUDGET_PER_BUILDING=50000 # monthly token cap, graceful fallback to FAQ
 5. **Arrears forecast scheduler wiring** — `forecastArrears()` exists and is tested; wire it into the weekly scheduler to write `AlertRule` (`ARREARS_WOW`) and surface `riskUnits` via the KPI endpoint.
 6. Pull `meltemi:7b` + `bge-m3` on staging; set `LLM_PROVIDER=openai-compatible`, `AI_LOCAL_ONLY=true`; run the golden-set (§8 checklist).
 
-References: `apps/api/src/assistant/assistant.service.ts:1`, `apps/api/src/assistant/llm-provider.ts:1`, `apps/api/src/assistant/defect-classifier.ts:1`, `apps/api/src/supplier-invoices/ocr.service.ts:1`, `apps/api/src/assembly/praktiko-draft.spec.ts:1`, `apps/api/src/kpi/kpi.service.ts:257`, `.env.example:96-118`, `apps/web/src/app/ui/money.pipe.ts:1`, `docs/FEATURE_PLAN.md:17`, `docs/INTERNATIONAL_PLAN.md`, `apps/api/prisma/schema.prisma:106-108` (`Building.market/currency`), `apps/api/src/audit/audit.service.ts` (hash chain).
+References: `apps/api/src/assistant/assistant.service.ts`, `apps/api/src/assistant/llm-provider.ts`, `apps/api/src/assistant/privacy.ts`, `apps/api/src/assistant/defect-classifier.ts`, `apps/api/src/mydata/*`, `apps/api/src/pdf/pdf.service.ts`, `libs/shared/src/lib/money.ts`, `libs/shared/src/lib/market.ts`. No Prisma schema/migration changes are implied by this status update; embedding, VAT persistence, and country-specific tax fields remain schema follow-ups.

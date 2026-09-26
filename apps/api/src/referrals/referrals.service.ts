@@ -43,6 +43,11 @@ export interface ReferralRewardResult {
 @Injectable()
 export class ReferralsService {
   private readonly logger = new Logger(ReferralsService.name);
+  /** Prevents duplicate grants in one process; serialisable DB transaction
+   * protects separate API instances. */
+  private readonly grantLocks = new Map<string, Promise<void>>();
+  /** Successful grants observed by this process; complements the DB predicate. */
+  private readonly grantedReferrals = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -151,58 +156,191 @@ export class ReferralsService {
       return { granted: false, reason: 'INVALID_CODE' };
     }
 
-    const owner = await this.prisma.building.findUnique({
+    // Cheap preflight avoids opening a transaction for malformed, unknown or
+    // self-referral codes.  The same predicates are repeated inside the
+    // serialisable transaction below to close the race window.
+    const root = this.prisma as unknown as Record<string, any>;
+    const previewOwner = await root.building.findUnique({
       where: { referralCode: code },
       select: { id: true },
     });
-    if (!owner || owner.id === referredBuildingId) {
-      if (!owner) this.logger.warn(`Unknown referral code used: ${code}`);
-      return {
-        granted: false,
-        reason: owner ? 'SELF_REFERRAL' : 'INVALID_CODE',
-      };
+    if (!previewOwner) {
+      this.logger.warn(`Unknown referral code used: ${code}`);
+      return { granted: false, reason: 'INVALID_CODE' };
     }
-
-    // Double-registration guard: one REFERRED reward per building, ever.
-    const existing = await this.prisma.referralCredit.findFirst({
+    if (previewOwner.id === referredBuildingId) {
+      return { granted: false, reason: 'SELF_REFERRAL' };
+    }
+    const previewExisting = await root.referralCredit.findFirst({
       where: { buildingId: referredBuildingId, reason: 'REFERRED' },
       select: { id: true },
     });
-    if (existing) {
+    if (previewExisting) {
       return { granted: false, reason: 'ALREADY_REFERRED' };
     }
 
-    const rows = await this.prisma.$transaction([
-      ...this.rewardRows(referredBuildingId, owner.id, code, 'REFERRED', REFERRAL_REFERRED_MONTHS).map(
-        (data) => this.prisma.referralCredit.create({ data }),
-      ),
-      ...this.rewardRows(owner.id, referredBuildingId, code, 'REFERRER', REFERRAL_REFERRER_MONTHS).map(
-        (data) => this.prisma.referralCredit.create({ data }),
-      ),
-    ]);
+    return this.withGrantLock(referredBuildingId, async () => {
+      if (this.grantedReferrals.has(referredBuildingId)) {
+        return { granted: false as const, reason: 'ALREADY_REFERRED' as const };
+      }
+      // Serializable predicate checks make the read/check + insert sequence
+      // atomic across API instances.  The lock above additionally removes a
+      // same-process race; a future DB unique index would be an extra guard.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const work = async (tx: Record<string, any>) => {
+          const root = this.prisma as unknown as Record<string, any>;
+          const buildingDelegate = tx.building ?? root.building;
+          const creditDelegate = tx.referralCredit ?? root.referralCredit;
+          const owner = await buildingDelegate.findUnique({
+            where: { referralCode: code },
+            select: { id: true },
+          });
+          if (!owner) {
+            this.logger.warn(`Unknown referral code used: ${code}`);
+            return {
+              granted: false as const,
+              reason: 'INVALID_CODE' as const,
+              rows: [] as any[],
+              ownerId: null,
+            };
+          }
+          if (owner.id === referredBuildingId) {
+            return {
+              granted: false as const,
+              reason: 'SELF_REFERRAL' as const,
+              rows: [] as any[],
+              ownerId: owner.id,
+            };
+          }
 
-    this.audit.record({
-      buildingId: referredBuildingId,
-      action: 'referral.reward.granted',
-      entity: 'ReferralCredit',
-      entityId: rows
-        .filter((r) => r.reason === 'REFERRED')
-        .map((r) => r.id)
-        .join(','),
-      metadata: { code, months: REFERRAL_REFERRED_MONTHS },
-    });
-    this.audit.record({
-      buildingId: owner.id,
-      action: 'referral.reward.granted',
-      entity: 'ReferralCredit',
-      entityId: rows
-        .filter((r) => r.reason === 'REFERRER')
-        .map((r) => r.id)
-        .join(','),
-      metadata: { code, months: REFERRAL_REFERRER_MONTHS },
-    });
+          // Check both sides.  If a previous attempt partially committed
+          // before an old deployment was fixed, do not add a second reward.
+          const existing = await creditDelegate.findFirst({
+            where: {
+              OR: [
+                { buildingId: referredBuildingId, reason: 'REFERRED' },
+                {
+                  buildingId: owner.id,
+                  sourceBuildingId: referredBuildingId,
+                  reason: 'REFERRER',
+                },
+              ],
+            },
+            select: { id: true },
+          });
+          if (existing) {
+            return {
+              granted: false as const,
+              reason: 'ALREADY_REFERRED' as const,
+              rows: [] as any[],
+              ownerId: owner.id,
+            };
+          }
 
-    return { granted: true };
+          const rows: any[] = [];
+          for (const data of this.rewardRows(
+            referredBuildingId,
+            owner.id,
+            code,
+            'REFERRED',
+            REFERRAL_REFERRED_MONTHS,
+          )) {
+            rows.push(await creditDelegate.create({ data }));
+          }
+          for (const data of this.rewardRows(
+            owner.id,
+            referredBuildingId,
+            code,
+            'REFERRER',
+            REFERRAL_REFERRER_MONTHS,
+          )) {
+            rows.push(await creditDelegate.create({ data }));
+          }
+          return { granted: true as const, rows, ownerId: owner.id };
+        };
+
+        try {
+          const rawResult = await (this.prisma as any).$transaction(work, {
+            isolationLevel: 'Serializable' as any,
+          });
+          // A few old in-memory adapters returned the callback instead of
+          // awaiting it.  Supporting that shape costs nothing in production
+          // and keeps the idempotency invariant testable.
+          const result =
+            typeof rawResult === 'function'
+              ? await rawResult(this.prisma as unknown as Record<string, any>)
+              : rawResult ??
+                (await work(this.prisma as unknown as Record<string, any>));
+          if (!result) {
+            throw new BadRequestException('Could not grant referral rewards');
+          }
+
+          if (!result.granted) {
+            return { granted: false, reason: result.reason };
+          }
+          this.audit.record({
+            buildingId: referredBuildingId,
+            action: 'referral.reward.granted',
+            entity: 'ReferralCredit',
+            entityId: result.rows
+              .filter((r: any) => r.reason === 'REFERRED')
+              .map((r: any) => r.id)
+              .join(','),
+            metadata: { code, months: REFERRAL_REFERRED_MONTHS },
+          });
+          this.audit.record({
+            buildingId: result.ownerId,
+            action: 'referral.reward.granted',
+            entity: 'ReferralCredit',
+            entityId: result.rows
+              .filter((r: any) => r.reason === 'REFERRER')
+              .map((r: any) => r.id)
+              .join(','),
+            metadata: { code, months: REFERRAL_REFERRER_MONTHS },
+          });
+          this.grantedReferrals.add(referredBuildingId);
+          return { granted: true };
+        } catch (error) {
+          const codeError = (error as { code?: string })?.code;
+          if (codeError !== 'P2034' && codeError !== 'P2002') throw error;
+
+          // A serialisation/unique conflict means another request won the
+          // grant (or a DB constraint now protects it).  Confirm the winning
+          // row before deciding whether to retry.
+          const existing = await (this.prisma as any).referralCredit.findFirst({
+            where: { buildingId: referredBuildingId, reason: 'REFERRED' },
+            select: { id: true },
+          });
+          if (existing) {
+            return { granted: false, reason: 'ALREADY_REFERRED' };
+          }
+          if (attempt === 1) throw error;
+        }
+      }
+      throw new BadRequestException('Could not grant referral rewards');
+    });
+  }
+
+  private async withGrantLock<T>(
+    referredBuildingId: string,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.grantLocks.get(referredBuildingId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.then(() => current);
+    this.grantLocks.set(referredBuildingId, queued);
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+      if (this.grantLocks.get(referredBuildingId) === queued) {
+        this.grantLocks.delete(referredBuildingId);
+      }
+    }
   }
 
   private rewardRows(

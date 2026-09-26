@@ -86,7 +86,8 @@ const AUDIENCE_LABELS: Record<AnnouncementAudience, string> = {
       <div class="lg:col-span-2">
         @if (loadError()) {
           <div class="card border-red-200 bg-red-50 text-sm text-red-700">
-            Αποτυχία φόρτωσης ανακοινώσεων.
+            <p>Αποτυχία φόρτωσης ανακοινώσεων.</p>
+            <button type="button" class="btn btn-secondary mt-3" (click)="loadBuilding()">Δοκιμή ξανά</button>
           </div>
         }
         <div class="flex flex-col gap-3">
@@ -176,6 +177,12 @@ export class AdminAnnouncementsPage implements OnInit {
   private buildingId: string | null = null;
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    this.loading.set(true);
+    this.loadError.set(false);
     this.buildingsApi
       .mine()
       .pipe(
@@ -278,11 +285,13 @@ export class AdminAnnouncementsPage implements OnInit {
   }
 
   protected remove(item: AnnouncementDto): void {
-    this.announcementsApi
-      .delete(item.id)
-      .pipe(catchError(() => EMPTY))
-      .subscribe(() => this.reload());
-    this.toast.info(`Διαγράφηκε: ${item.title}`);
+    this.announcementsApi.delete(item.id).subscribe({
+      next: () => {
+        this.toast.info(`Διαγράφηκε: ${item.title}`);
+        this.reload();
+      },
+      error: () => this.toast.error('Η διαγραφή της ανακοίνωσης απέτυχε.'),
+    });
   }
 
   protected reload(): void {

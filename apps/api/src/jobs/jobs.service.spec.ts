@@ -333,7 +333,10 @@ describe('JobsService', () => {
 
       expect(prisma.job.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { status: 'OPEN', source: { not: 'RESIDENT_REPORT' } },
+          where: {
+            status: 'OPEN',
+            source: { notIn: ['RESIDENT_REPORT', 'MAINTENANCE_SCHEDULE'] },
+          },
         }),
       );
       expect(views[0].buildingName).toBe('Avgi');

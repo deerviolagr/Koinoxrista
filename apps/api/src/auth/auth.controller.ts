@@ -1,11 +1,13 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   HttpCode,
   Post,
   Req,
   Res,
+  UnauthorizedException,
   UseGuards,
   UsePipes,
   ValidationPipe,
@@ -16,10 +18,13 @@ import { Role } from '@prisma/client';
 import {
   REFRESH_COOKIE_MAX_AGE_MS,
   REFRESH_COOKIE_NAME,
+  REFRESH_COOKIE_PATH,
   HttpRequest,
   HttpResponse,
 } from './auth.types';
 import { AuthService } from './auth.service';
+import { normalizeEmail } from './auth.types';
+import { isAllowedAuthOrigin } from './security-config';
 import { CurrentUser } from './decorators/current-user.decorator';
 import {
   ChangeEmailDto,
@@ -62,6 +67,14 @@ const registerThrottle = {
   },
 };
 
+function safeRefererOrigin(referer: string): string | undefined {
+  try {
+    return new URL(referer).origin;
+  } catch {
+    return undefined;
+  }
+}
+
 @Controller('auth')
 @UsePipes(new ValidationPipe({ whitelist: true }))
 @UseGuards(RolesGuard)
@@ -88,6 +101,7 @@ export class AuthController {
     @Req() req: HttpRequest,
     @Res({ passthrough: true }) res: HttpResponse,
   ) {
+    this.assertTrustedOrigin(req);
     const result = await this.authService.login(dto, this.sessionMeta(req));
     if (result.twoFactorRequired === true) {
       // No tokens, no refresh cookie until the second factor is verified.
@@ -103,9 +117,17 @@ export class AuthController {
   async login2fa(
     @Body() dto: TwoFactorLoginDto,
     @Res({ passthrough: true }) res: HttpResponse,
+    @Req() req?: HttpRequest,
   ) {
-    const { accessToken, refreshToken } =
-      await this.authService.verifyTwoFactorLogin(dto);
+    this.assertTrustedOrigin(req);
+    const tokens =
+      req === undefined
+        ? await this.authService.verifyTwoFactorLogin(dto)
+        : await this.authService.verifyTwoFactorLogin(
+            dto,
+            this.sessionMeta(req),
+          );
+    const { accessToken, refreshToken } = tokens;
     this.setRefreshCookie(res, refreshToken);
     return { accessToken };
   }
@@ -155,7 +177,7 @@ export class AuthController {
     @Body() dto: ChangeEmailDto,
   ) {
     await this.authService.changeEmail(user.id, dto);
-    return { email: dto.newEmail.toLowerCase() };
+    return { email: normalizeEmail(dto.newEmail) };
   }
 
   @Post('2fa/disable')
@@ -177,11 +199,39 @@ export class AuthController {
     @Req() req: HttpRequest,
     @Res({ passthrough: true }) res: HttpResponse,
   ) {
+    this.assertTrustedOrigin(req);
     const refreshToken = this.readRefreshCookie(req);
     const { accessToken, refreshToken: rotatedRefreshToken } =
       await this.authService.refresh(refreshToken, this.sessionMeta(req));
     this.setRefreshCookie(res, rotatedRefreshToken);
     return { accessToken };
+  }
+
+  @Post('logout')
+  @HttpCode(200)
+  @Throttle(authThrottle)
+  async logout(
+    @Req() req: HttpRequest,
+    @Res({ passthrough: true }) res: HttpResponse,
+  ) {
+    this.assertTrustedOrigin(req);
+    const refreshToken = this.readRefreshCookie(req);
+    try {
+      if (
+        typeof (this.authService as unknown as { logout?: unknown }).logout ===
+        'function'
+      ) {
+        await (
+          this.authService as unknown as {
+            logout(token: string | undefined): Promise<{ revoked: boolean }>;
+          }
+        ).logout(refreshToken);
+      }
+    } finally {
+      // Always clear the browser credential, including expired/replayed ones.
+      this.clearRefreshCookie(res);
+    }
+    return { loggedOut: true as const };
   }
 
   @Get('buildings')
@@ -197,7 +247,9 @@ export class AuthController {
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: SwitchBuildingDto,
     @Res({ passthrough: true }) res: HttpResponse,
+    @Req() req?: HttpRequest,
   ) {
+    this.assertTrustedOrigin(req);
     if (user.role === Role.ACCOUNTANT) {
       // Λογιστές switch via per-building grants, not memberships.
       await this.authService.assertAccountantBuildingAccess(
@@ -212,7 +264,7 @@ export class AuthController {
       dto.buildingId,
     );
     const { accessToken, refreshToken } =
-      this.authService.issueTokens(updatedUser);
+      await this.authService.issueTokens(updatedUser);
     this.setRefreshCookie(res, refreshToken);
     return { accessToken };
   }
@@ -220,9 +272,12 @@ export class AuthController {
   @Get('me')
   @UseGuards(JwtAuthGuard)
   async me(@CurrentUser() user: AuthenticatedUser) {
+    if (user.status !== 'ACTIVE') {
+      throw new UnauthorizedException('User is not active');
+    }
     const memberships = await this.membershipsService.listForUser(user.id);
     const active = memberships.find((m) => m.building.id === user.buildingId);
-    return {
+    const response = {
       id: user.id,
       email: user.email,
       role: user.role,
@@ -231,24 +286,62 @@ export class AuthController {
       currency: active?.building.currency ?? 'EUR',
       twoFactorEnabled: await this.twoFactorService.isEnabled(user.id),
       memberships,
+      ...(user.status !== undefined ? { status: user.status } : {}),
     };
+    return response;
   }
 
   /** Device info attached to refresh-session rows (login/refresh bookkeeping). */
-  private sessionMeta(req: HttpRequest): { userAgent: string | null; ip: string | null } {
+  private sessionMeta(req: HttpRequest): {
+    userAgent: string | null;
+    ip: string | null;
+  } {
     return {
-      userAgent: req.headers['user-agent'] ?? null,
-      ip: req.ip ?? null,
+      userAgent: req?.headers?.['user-agent'] ?? null,
+      ip: req?.ip ?? null,
     };
+  }
+
+  private assertTrustedOrigin(req?: HttpRequest): void {
+    const origin = req?.headers?.origin;
+    const referer = req?.headers?.referer;
+    const candidate =
+      origin ?? (referer ? safeRefererOrigin(referer) : undefined);
+    if (!isAllowedAuthOrigin(candidate)) {
+      throw new ForbiddenException('Untrusted request origin');
+    }
   }
 
   private setRefreshCookie(res: HttpResponse, token: string): void {
     res.cookie(REFRESH_COOKIE_NAME, token, {
       httpOnly: true,
-      sameSite: 'lax',
+      // Strict in production prevents cross-site cookie-authenticated writes;
+      // development retains lax behavior for local proxy setups.
+      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
       secure: process.env.NODE_ENV === 'production',
       maxAge: REFRESH_COOKIE_MAX_AGE_MS,
-      path: '/',
+      path: REFRESH_COOKIE_PATH,
+    });
+  }
+
+  private clearRefreshCookie(res: HttpResponse): void {
+    const options = {
+      httpOnly: true,
+      sameSite: (process.env.NODE_ENV === 'production' ? 'strict' : 'lax') as
+        'strict' | 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      path: REFRESH_COOKIE_PATH,
+    };
+    if (typeof res.clearCookie === 'function') {
+      res.clearCookie(REFRESH_COOKIE_NAME, options);
+      return;
+    }
+    // Minimal response mocks and non-Express adapters may not expose
+    // clearCookie; an expiring empty cookie is equivalent there.
+    res.cookie(REFRESH_COOKIE_NAME, '', {
+      ...options,
+      maxAge: 0,
+      expires: new Date(0),
     });
   }
 
@@ -258,14 +351,18 @@ export class AuthController {
   }
 
   private readRefreshCookie(req: HttpRequest): string | undefined {
-    const header = req.headers.cookie;
+    const header = req?.headers?.cookie;
     if (!header) return undefined;
     for (const part of header.split(';')) {
       const separator = part.indexOf('=');
       if (separator === -1) continue;
       const name = part.slice(0, separator).trim();
       if (name === REFRESH_COOKIE_NAME) {
-        return decodeURIComponent(part.slice(separator + 1).trim());
+        try {
+          return decodeURIComponent(part.slice(separator + 1).trim());
+        } catch {
+          return undefined;
+        }
       }
     }
     return undefined;

@@ -1,5 +1,6 @@
 /* PolykatoikiaOS minimal hand-rolled service worker (no @angular/service-worker). */
-const CACHE = 'polyos-v1';
+const CACHE_PREFIX = 'polyos-';
+const CACHE = `${CACHE_PREFIX}v2`;
 const PRECACHE = [
   '/',
   '/index.html',
@@ -22,7 +23,11 @@ self.addEventListener('activate', (event) => {
     caches
       .keys()
       .then((keys) =>
-        Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key))),
+        Promise.all(
+          keys
+            .filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE)
+            .map((key) => caches.delete(key)),
+        ),
       )
       .then(() => self.clients.claim()),
   );
@@ -34,18 +39,24 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith('/api')) return; // API is always network.
+  if (url.pathname === '/api' || url.pathname.startsWith('/api/')) return;
 
   if (request.mode === 'navigate') {
-    // Network-first for navigations, fall back to the cached shell.
+    // Network-first keeps deep links fresh; the app shell is the offline fallback.
     event.respondWith(
       fetch(request)
         .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE).then((cache) => cache.put('/index.html', copy));
+          if (response.ok && response.type === 'basic') {
+            const copy = response.clone();
+            void caches
+              .open(CACHE)
+              .then((cache) => cache.put('/index.html', copy));
+          }
           return response;
         })
-        .catch(() => caches.match('/index.html')),
+        .catch(
+          async () => (await caches.match('/index.html')) || Response.error(),
+        ),
     );
     return;
   }
@@ -57,11 +68,11 @@ self.addEventListener('fetch', (event) => {
         .then((response) => {
           if (response.ok) {
             const copy = response.clone();
-            caches.open(CACHE).then((cache) => cache.put(request, copy));
+            void caches.open(CACHE).then((cache) => cache.put(request, copy));
           }
           return response;
         })
-        .catch(() => cached);
+        .catch(() => cached || Response.error());
       return cached || network;
     }),
   );
@@ -79,23 +90,42 @@ self.addEventListener('push', (event) => {
       body: payload.body || '',
       icon: '/icons/icon.svg',
       badge: '/icons/icon-maskable.svg',
-      data: { linkPath: payload.linkPath || '/' },
+      data: {
+        linkPath: safeNotificationPath(payload.linkPath || payload.url || '/'),
+      },
     }),
   );
 });
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const linkPath = (event.notification.data && event.notification.data.linkPath) || '/';
+  const linkPath = safeNotificationPath(event.notification.data?.linkPath);
   event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
-      for (const client of clients) {
-        if ('focus' in client) {
-          client.navigate(linkPath);
-          return client.focus();
+    self.clients
+      .matchAll({ type: 'window', includeUncontrolled: true })
+      .then((clients) => {
+        const existing = clients.find((client) => {
+          try {
+            return new URL(client.url).origin === self.location.origin;
+          } catch {
+            return false;
+          }
+        });
+        if (existing) {
+          existing.postMessage({ type: 'NAVIGATE', url: linkPath });
+          return existing.focus();
         }
-      }
-      return self.clients.openWindow(linkPath);
-    }),
+        return self.clients.openWindow(linkPath);
+      }),
   );
 });
+
+function safeNotificationPath(value) {
+  try {
+    const url = new URL(String(value || '/'), self.location.origin);
+    if (url.origin !== self.location.origin) return '/';
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return '/';
+  }
+}

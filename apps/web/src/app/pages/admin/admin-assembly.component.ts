@@ -84,14 +84,20 @@ const BALLOT_LABELS: Record<string, string> = {
   template: `
     <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
       <h1 class="text-xl font-bold text-slate-900">Διαδικτυακή συνέλευση</h1>
-      <a routerLink="/admin/praktiko/{{ voteId() }}" class="btn btn-primary">
+      <a [routerLink]="['/admin/praktiko', voteId()]" class="btn btn-primary">
         Πρακτικό
+      </a>
+      <a [routerLink]="['/admin/votes', voteId()]" class="btn btn-secondary">
+        Ψηφοφορία
       </a>
     </div>
 
     @if (error()) {
       <div class="card border-red-200 bg-red-50 text-sm text-red-700">
-        Αποτυχία φόρτωσης συνέλευσης.
+        <p>Αποτυχία φόρτωσης συνέλευσης.</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="reload()">
+          Δοκιμή ξανά
+        </button>
       </div>
     } @else {
       <section class="card mb-6">

@@ -39,6 +39,8 @@
 | Building naming | Greek-specific vocab (`polykatoikia`, `Κοινόχρηστα`, `Εκκαθάριση`, assembly `πρακτικό`) | UI strings + translated keys |
 | Bank import | GR-bank CSV parser (delimiters, date formats, IBAN-centric reconciliation) | `bank-import/*` |
 
+> The table above is the original baseline inventory, not a claim that every listed integration is shipped. See the rollout/status table and README for current partial/external-QA boundaries.
+
 ---
 
 ## 2. Market profile data model (the core enabler)
@@ -64,6 +66,7 @@ A **market registry** (pure config, in `libs/shared`, mirrored server-side) reso
 |---|---|---|---|---|---|
 | `GR` | EUR | Viva (card + IRIS) | AADE myDATA | `el-GR` | el |
 | `EU` (non-GR, e.g. DE/FR/ES/IT/PT/NL/PL/SE) | EUR, PLN, GBP, SEK, CZK… | Stripe SEPA + cards + iDEAL/Bancontact/PayPal (EU rails) | local e-invoice where mandatory (IT FatturaPA, DE XRechnung, FR Factur-X) or standard VAT invoice | `de-DE`, `fr-FR`, `es-ES`, `it-IT`, `pt-PT`, `en-GB`… | localized EU grammars |
+| `JP` | JPY | Stripe JP/GMO (credentialed integration) | qualified-invoice fields only; no live JP filing adapter claimed | `ja-JP` | ja |
 | `US` | USD | Stripe (cards + ACH/iDEAL-equivalent bank + Apple/Google Pay) | US sales-tax memo / no mandatory e-invoice; Booking-style receipt | `en-US` | en |
 | `CA` | CAD | Stripe (cards + Interac) | GST/HST memo | `en-CA` / `fr-CA` | en, fr |
 | `MX` | MXN | Stripe + local OXXO/SPEI (or Mercado Pago) | CFDI — `cfdi` adapter | `es-MX` | es |
@@ -209,15 +212,15 @@ GR `gdpr` specs unchanged.
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **P0-1 ✅ · Currency core (all markets)** | `Building.currency`/`market` + additive migration; `market.ts` registry (GR default); `formatMoney` (Intl) + byte-identical `formatEuros`; currency-bucket pricing | GR unchanged (all specs green); `shared`+`api`+`web` suites pass |
+| **P0-1 🟡 · Currency core (all markets)** | `Building.currency`/`market` + additive migration; `market.ts` registry (GR default plus JP); shared `money.ts` with explicit minor units (CLP/COP/JPY), safe parsing/formatting, and invalid-currency errors; market/currency/provider compatibility validation | GR/shared regression tests pass; live PSP/tax behavior remains external QA |
 | **P0-2 ✅ · Payments generalization** | `stripe.adapter.ts` (market-aware, configurable currency/locale); `mercadopago.adapter.ts` (Checkout Pro + mock fallback); `PaymentMethod` +`PIX/ACH/SPEI/SEPA_DD/INTERAC` (additive migration); `startCheckout` routes by `pspProvider`; webhook routing by provider (Viva/Stripe/MercadoPago) | US Stripe + BR PIX reconcile (server-side status verified); GR Viva e2e green |
 | **P0-3 ✅ · Allocation strategies** | `SQUARE_METERS`/`SHARE_FRACTION` strategies (additive enum + migration); `Unit.squareMeters`/`shareFraction` columns + DTOs + web unit form; `resolveAllocationWeights` scales m² → integer hundredths; generalized ownership-weight basis (`ownership-weights.ts`) used by votes/tenancy/assembly tallies | NA-style split Σ = total; GR millimes regression-proof (all specs green) |
 | **P0-3b ✅ · HEADCOUNT / UNIT_EQUAL** | `HEADCOUNT` allocation strategy (weight 1 per unit, ignores millimes); `HEADCOUNT` vote threshold (per-unit quorum + majority) in `tally-vote`/DTOs/quorum + votes/tenancy/assembly tallies; web threshold dropdown + labels | Equal-per-unit split Σ = total; GR millimes/quorum behavior unchanged (all specs green) |
 | **P0-3c ✅ · Reserve/levy strategies** | Extraordinary levy creation supports `SQUARE_METERS`/`SHARE_FRACTION` (DTO `IsIn`, `ALLOWED_STRATEGIES`, `resolveAllocationWeights` reuse, unit select); shared `LevyStrategy` + labels; web levy form dropdown + local share preview + helper text | Levy split Σ = total for both strategies; GR MILIMES/UNITS unchanged (all specs green) |
-| **P1 · i18n + compliance** | `es` locale; number/date Intl; Market compliance kinds; GR myDATA gating | es.json green; GDPR/LGPD labels by market |
+| **P1 🟡 · i18n + compliance** | `es` locale and number/date Intl work in the client; shared PDF money is locale/currency-aware; GR myDATA is gated and requires explicit VAT configuration; country-specific compliance labels/adapters remain partial | Shared/API targeted tests pass; live tax/provider compliance is external QA |
 | **P2 · E-invoice adapters + bank import** | CFDI/NFe/FatturaPA stubs; NA/EU/SA bank formats | Non-GR receipt + import paths documented stubs |
 
-No phase alters GR defaults; each phase ends with `api` + `web` tests green.
+No phase may alter GR defaults. Local targeted tests cover the shared contracts; live PSP/tax/e-invoice paths remain external QA and are not represented as green by unit tests.
 
 ---
 
@@ -229,4 +232,12 @@ No phase alters GR defaults; each phase ends with `api` + `web` tests green.
 - **Regression:** each migration is additive with defaults; existing unit/e2e specs are the contract —
   `pnpm nx run-many -t test --all` must stay green before and after each phase.
 - **Tax scope:** do not claim full multi-jurisdiction tax filing; ship compliant *receipts* + adapter
-  seams, mark live e-invoice submission (CFDI/NFe) as credentialed follow-ups.
+  seams, mark live e-invoice submission (CFDI/NFe/JP) as credentialed follow-ups.
+
+### Schema needs intentionally left open
+
+This status pass does not edit Prisma schema or migrations. A production rollout still needs a
+validated per-invoice net/VAT breakdown (or an authoritative source for it), country/market
+constraints, and an auditable e-invoice adapter boundary. The current myDATA service fails closed
+without `MYDATA_VAT_RATE_BPS`; this is safer than silently inventing a 24% rate. Live AADE/PSP and
+embedding infrastructure remain external QA items.

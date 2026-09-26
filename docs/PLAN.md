@@ -141,7 +141,7 @@ Free 60-day trial, minimum 4 units, annual prepay −15%.
 | Phase 33 ✅ | 2026-08 | **Partner leads pipeline** — insurance/elevator/energy lead tracker with forward-only status machine (WON requires realized amount, LOST terminal), won-commission summaries by category/month, kanban-lite UI | Transition matrix enforced; summaries aggregate won commissions only |
 | Phase 34 ✅ | 2026-08 | **Trust & ops polish** — RefreshSession device management (list/revoke/revoke-others, rotation-aware), public `/health` (db ping → degraded), localStorage-gated help tours on role landings, dependency-free PostHog beacon funnel events (env-gated) | Users revoke stale devices; funnels measurable when POSTHOG_KEY set |
 
-Remaining sandbox QA: AADE live credentials (full XSD mapping done: issue metadata, income classifications, invoiceSummary totals, VAT-category codes); Viva IRIS end-to-end in demo PSP.
+Remaining sandbox QA: AADE live credentials and a real VAT source (the local myDATA path is GR-only and fails closed without `MYDATA_VAT_RATE_BPS`); Viva IRIS end-to-end in demo PSP.
 
 ## 8. Verification Strategy
 

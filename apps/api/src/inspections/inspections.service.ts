@@ -8,7 +8,11 @@ import { Role } from '@prisma/client';
 
 import type { AuthenticatedUser } from '../auth/auth.types';
 import { AuditService } from '../audit/audit.service';
-import { assertSameBuilding } from '../common/tenant';
+import {
+  assertSameBuilding,
+  effectiveBuildingRole,
+  isAdminLikeRole,
+} from '../common/tenant';
 import { PrismaService } from '../prisma/prisma.service';
 
 export type InspectionResult = 'OK' | 'NG' | 'REPAIR_NEEDED';
@@ -70,14 +74,25 @@ export class InspectionsService {
       where: { id: assetId, buildingId },
     });
     if (!asset) throw new NotFoundException('Asset not found');
-    if (!this.isAdminLike(user) && !this.isProviderForAsset(user, assetId)) {
+    const isAdmin = await this.isAdminForBuilding(buildingId, user);
+    const isProvider = !isAdmin && (await this.isProviderForBuilding(buildingId, user));
+    if (!isAdmin && !isProvider) {
       throw new ForbiddenException('Only admins or assigned providers can log inspections');
     }
 
     const inspectedAt = dto.inspectedAt ? new Date(dto.inspectedAt) : new Date();
-    const relatedJobId =
-      dto.jobId ??
-      (await this.jobIdForAsset(buildingId, assetId));
+    if (Number.isNaN(inspectedAt.getTime())) {
+      throw new BadRequestException('inspectedAt must be a valid ISO datetime');
+    }
+    // A provider must identify the awarded job on the first inspection.  An
+    // admin-created inspection may omit it and use the historical asset link.
+    const relatedJobId = await this.resolveInspectionJob(
+      buildingId,
+      assetId,
+      dto.jobId,
+      isProvider,
+      user,
+    );
 
     const created = await this.prisma.inspectionRecord.create({
       data: {
@@ -95,7 +110,22 @@ export class InspectionsService {
 
     // A positive inspection refreshes the schedule's lastDoneAt.
     if (created.result === 'OK') {
-      await this.refreshSchedule(assetId, inspectedAt);
+      await this.refreshSchedule(buildingId, assetId, inspectedAt);
+      if (isProvider && relatedJobId) {
+        const workLog = (this.prisma as unknown as {
+          workLog?: { create: (args: unknown) => Promise<unknown> };
+        }).workLog;
+        if (workLog?.create) {
+          await workLog.create({
+            data: {
+              jobId: relatedJobId,
+              providerUserId: user.id,
+              note: dto.notes?.trim() || 'Inspection completed',
+              loggedAt: inspectedAt,
+            },
+          });
+        }
+      }
     }
 
     this.audit.record({
@@ -113,7 +143,7 @@ export class InspectionsService {
   /** Admin removes an erroneous inspection record. */
   async remove(buildingId: string, id: string, user: AuthenticatedUser): Promise<void> {
     assertSameBuilding(user, buildingId);
-    if (!this.isAdminLike(user)) {
+    if (!(await this.isAdminForBuilding(buildingId, user))) {
       throw new ForbiddenException('Only admins can remove inspection records');
     }
     const record = await this.prisma.inspectionRecord.findFirst({
@@ -139,6 +169,9 @@ export class InspectionsService {
     user: AuthenticatedUser,
   ): Promise<{ totalCents: number; byJob: Record<string, number> }> {
     assertSameBuilding(user, buildingId);
+    if (!(await this.isAdminForBuilding(buildingId, user))) {
+      throw new ForbiddenException('Only admins can view asset costs');
+    }
     const asset = await this.prisma.buildingAsset.findFirst({
       where: { id: assetId, buildingId },
     });
@@ -186,22 +219,78 @@ export class InspectionsService {
     };
   }
 
-  private isAdminLike(user: AuthenticatedUser): boolean {
-    return user.role === Role.ADMIN || user.role === Role.BUILDING_OWNER;
+  private async effectiveRoleForBuilding(
+    buildingId: string,
+    user: AuthenticatedUser,
+  ): Promise<Role> {
+    return (await effectiveBuildingRole(this.prisma, user, buildingId)) ?? user.role;
   }
 
-  private async isProviderForAsset(
+  private async isAdminForBuilding(
+    buildingId: string,
     user: AuthenticatedUser,
-    assetId: string,
   ): Promise<boolean> {
-    if (user.role !== Role.PROVIDER) return false;
-    const jobIds = await this.jobsForAsset(user.buildingId ?? '', assetId);
-    if (jobIds.length === 0) return false;
-    const awarded = await this.prisma.bid.findFirst({
-      where: { jobId: { in: jobIds }, providerUserId: user.id, status: 'AWARDED' },
-      select: { id: true },
+    return isAdminLikeRole(await this.effectiveRoleForBuilding(buildingId, user));
+  }
+
+  private async isProviderForBuilding(
+    buildingId: string,
+    user: AuthenticatedUser,
+  ): Promise<boolean> {
+    return (await this.effectiveRoleForBuilding(buildingId, user)) === Role.PROVIDER;
+  }
+
+  /**
+   * Resolve and authorize the job carried by an inspection.  There is no
+   * assetId on Job in the current schema, so a provider's first inspection
+   * must name a job explicitly; the job and accepted bid are still validated
+   * against the same building and provider.  This prevents a provider from
+   * creating an orphan first record and then relying on a stale asset lookup.
+   */
+  private async resolveInspectionJob(
+    buildingId: string,
+    assetId: string,
+    requestedJobId: string | undefined,
+    provider: boolean,
+    user: AuthenticatedUser,
+  ): Promise<string | undefined> {
+    if (!requestedJobId) {
+      if (provider) {
+        throw new ForbiddenException(
+          'A provider inspection must reference an awarded job',
+        );
+      }
+      return this.jobIdForAsset(buildingId, assetId);
+    }
+
+    const job = await this.prisma.job.findFirst({
+      where: { id: requestedJobId, buildingId },
+      select: { id: true, status: true },
     });
-    return !!awarded;
+    if (!job) throw new NotFoundException('Job not found in this building');
+    if (
+      job.status &&
+      !['AWARDED', 'IN_PROGRESS', 'COMPLETED'].includes(job.status)
+    ) {
+      throw new BadRequestException('Job is not an awarded inspection job');
+    }
+
+    if (provider) {
+      const accepted = await this.prisma.bid.findFirst({
+        where: {
+          jobId: requestedJobId,
+          providerUserId: user.id,
+          status: 'ACCEPTED',
+        },
+        select: { id: true },
+      });
+      if (!accepted) {
+        throw new ForbiddenException(
+          'Only the provider with an accepted bid may log this inspection',
+        );
+      }
+    }
+    return requestedJobId;
   }
 
   private async jobIdForAsset(
@@ -223,9 +312,13 @@ export class InspectionsService {
     return records.map((r) => r.jobId as string);
   }
 
-  private async refreshSchedule(assetId: string, inspectedAt: Date): Promise<void> {
+  private async refreshSchedule(
+    buildingId: string,
+    assetId: string,
+    inspectedAt: Date,
+  ): Promise<void> {
     const schedule = await this.prisma.maintenanceSchedule.findFirst({
-      where: { assetId },
+      where: { assetId, buildingId },
       orderBy: { nextDueAt: 'asc' },
     });
     if (!schedule) return;

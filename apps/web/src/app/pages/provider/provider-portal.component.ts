@@ -1,9 +1,23 @@
-import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
-import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
-import { EMPTY, catchError, forkJoin, map } from 'rxjs';
-import { CreateWorkLogDto, JobStatus, MyPayoutDto, WorkLogView } from '@org/shared';
 import {
-  JobWithBids,
+  ChangeDetectionStrategy,
+  Component,
+  OnInit,
+  computed,
+  inject,
+  signal,
+} from '@angular/core';
+import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { EMPTY, catchError, forkJoin, map, of } from 'rxjs';
+import {
+  CreateWorkLogDto,
+  JobStatus,
+  MyPayoutDto,
+  WorkLogView,
+} from '@org/shared';
+import {
+  ProviderBidView,
+  ProviderMarketJob,
+  ProviderMineJob,
   JobsApiService,
   ProviderProfile,
   ProviderProfileApiService,
@@ -13,25 +27,30 @@ import {
   PayoutsApiService,
   supplierPaymentMethodLabel,
 } from '../../core/api/payouts-api.service';
-import { AuthService } from '../../core/auth.service';
+import { MoneyPipe } from '../../ui/money.pipe';
 import { ToastService } from '../../ui/toast.service';
-import { eurosToCents, formatEuros } from '../../ui/format';
-import {
-  HelpTourComponent,
-  HelpTourStep,
-} from '../../ui/help-tour.component';
+import { eurosToCents } from '../../ui/format';
+import { HelpTourComponent, HelpTourStep } from '../../ui/help-tour.component';
 import { TourService } from '../../core/tour.service';
 
 type ProviderTab = 'MARKET' | 'MINE' | 'PROFILE';
+type ProviderPayout = MyPayoutDto & { currency?: string };
+type ProviderMineGroup = {
+  status: JobStatus;
+  label: string;
+  jobs: ProviderMineJob[];
+};
 
-/** Finds the current provider's still-active bid on a job (pure). */
+/** Finds the current provider's submitted bid in a stable marketplace row. */
 export function findOwnActiveBid(
-  job: Pick<JobWithBids, 'bids'>,
-  userId: string | null | undefined,
-): NonNullable<JobWithBids['bids']>[number] | null {
+  job: Pick<ProviderMarketJob, 'bids'>,
+  userId?: string | null,
+): ProviderBidView | null {
   return (
-    job.bids?.find(
-      (bid) => bid.providerUserId === userId && bid.status === 'SUBMITTED',
+    job.bids.find(
+      (bid) =>
+        bid.status === 'SUBMITTED' &&
+        (!userId || bid.providerUserId === userId),
     ) ?? null
   );
 }
@@ -44,22 +63,9 @@ export function parseCerts(value: string): string[] {
     .filter(Boolean);
 }
 
-/** Extended profile fields returned/stored alongside trade and certs. */
-type ProfileExtras = {
-  city?: string | null;
-  bio?: string | null;
-  hourlyRateCents?: number | null;
-};
-
-/** PUT payload for the provider profile (extra keys sent as-is). */
-type ProfilePayload = {
-  trade: string;
-  certs: string[];
-} & ProfileExtras;
-
 @Component({
   selector: 'app-provider-portal',
-  imports: [ReactiveFormsModule, HelpTourComponent],
+  imports: [ReactiveFormsModule, HelpTourComponent, MoneyPipe],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="mb-6 flex flex-wrap gap-2">
@@ -97,6 +103,10 @@ type ProfilePayload = {
         <h1 class="mb-4 text-xl font-bold text-slate-900">Αγορά εργασιών</h1>
         @if (loading()) {
           <div class="card text-sm text-slate-500">Φόρτωση…</div>
+        } @else if (loadError()) {
+          <div class="card border-red-200 bg-red-50 text-sm text-red-700">
+            Αποτυχία φόρτωσης της αγοράς.
+          </div>
         } @else if (marketJobs().length === 0) {
           <div class="card text-sm text-slate-500">
             Δεν υπάρχουν ανοιχτές εργασίες προς προσφορά αυτή τη στιγμή.
@@ -108,27 +118,32 @@ type ProfilePayload = {
               <div class="flex items-start justify-between gap-2">
                 <div>
                   <h2 class="font-semibold text-slate-900">{{ job.title }}</h2>
-                  @if (job.buildingName) {
-                    <p class="text-xs text-slate-500">{{ job.buildingName }}</p>
-                  }
+                  <p class="text-xs text-slate-500">{{ job.buildingName }}</p>
                 </div>
-                @if (job.budgetCents !== null && job.budgetCents !== undefined) {
+                @if (
+                  job.budgetCents !== null && job.budgetCents !== undefined
+                ) {
                   <span class="badge bg-slate-200 text-slate-700">
-                    Έως {{ euros(job.budgetCents) }}
+                    Έως {{ job.budgetCents | money: job.currency }}
                   </span>
                 }
               </div>
               <p class="mt-1 text-sm text-slate-600">{{ job.description }}</p>
 
               @if (ownBid(job); as bid) {
-                <div class="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3">
+                <div
+                  class="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3"
+                >
                   <p class="mb-2 text-xs font-semibold text-blue-800">
                     Η προσφορά σας (υπό εξέταση)
                   </p>
                   <div class="flex flex-wrap items-end gap-2">
                     <div>
-                      <label class="label !mb-1 text-xs" [for]="'amount-' + job.id">
-                        Ποσό €
+                      <label
+                        class="label !mb-1 text-xs"
+                        [for]="'amount-' + job.id"
+                      >
+                        Ποσό
                       </label>
                       <input
                         [id]="'amount-' + job.id"
@@ -136,17 +151,19 @@ type ProfilePayload = {
                         min="0"
                         step="0.01"
                         class="input !w-32"
-                        [value]="editAmount(job.id) ?? ''"
+                        [value]="editAmount(job.id, bid)"
                         (input)="onEditAmount(job.id, $event)"
                       />
                     </div>
                     <div class="min-w-48 grow">
-                      <label class="label !mb-1 text-xs" [for]="'msg-' + job.id">Μήνυμα</label>
+                      <label class="label !mb-1 text-xs" [for]="'msg-' + job.id"
+                        >Μήνυμα</label
+                      >
                       <input
                         [id]="'msg-' + job.id"
                         type="text"
                         class="input"
-                        [value]="editMessage(job.id) ?? (bid.message ?? '')"
+                        [value]="editMessage(job.id, bid)"
                         (input)="onEditMessage(job.id, $event)"
                       />
                     </div>
@@ -160,7 +177,8 @@ type ProfilePayload = {
                     </button>
                   </div>
                   <p class="mt-2 text-xs text-slate-500">
-                    Τρέχουσα προσφορά: {{ euros(bid.amountCents) }}
+                    Τρέχουσα προσφορά:
+                    {{ bid.amountCents | money: job.currency }}
                   </p>
                 </div>
               } @else {
@@ -180,74 +198,107 @@ type ProfilePayload = {
         <h1 class="mb-4 text-xl font-bold text-slate-900">Οι εργασίες μου</h1>
         @if (loading()) {
           <div class="card text-sm text-slate-500">Φόρτωση…</div>
+        } @else if (loadError()) {
+          <div class="card border-red-200 bg-red-50 text-sm text-red-700">
+            Αποτυχία φόρτωσης των εργασιών σας.
+          </div>
+        } @else if (mineGroups().length === 0) {
+          <div class="card text-sm text-slate-500">
+            Δεν έχετε υποβάλει προσφορές.
+          </div>
         }
         <div class="flex flex-col gap-6">
           @for (group of mineGroups(); track group.status) {
             <section>
               <h2 class="card-title">{{ group.label }}</h2>
               <div class="flex flex-col gap-4">
-                @for (job of group.jobs; track job.id) {
+                @for (entry of group.jobs; track entry.id) {
                   <div class="card">
                     <div class="flex items-start justify-between gap-2">
                       <div>
-                        <h3 class="font-semibold text-slate-900">{{ job.title }}</h3>
-                        @if (job.buildingName) {
-                          <p class="text-xs text-slate-500">{{ job.buildingName }}</p>
-                        }
+                        <h3 class="font-semibold text-slate-900">
+                          {{ entry.title }}
+                        </h3>
+                        <p class="text-xs text-slate-500">
+                          {{ entry.buildingName }}
+                        </p>
                       </div>
-                      <span class="badge shrink-0" [class]="jobStatusBadge(group.status).cls">
+                      <span
+                        class="badge shrink-0"
+                        [class]="jobStatusBadge(group.status).cls"
+                      >
                         {{ jobStatusBadge(group.status).label }}
                       </span>
                     </div>
-                    <p class="mt-1 text-sm text-slate-600">{{ job.description }}</p>
+                    @if (entry.description) {
+                      <p class="mt-1 text-sm text-slate-600">
+                        {{ entry.description }}
+                      </p>
+                    }
+                    <p class="mt-2 text-sm font-medium text-slate-700">
+                      Προσφορά:
+                      {{ entry.bid.amountCents | money: entry.currency }}
+                    </p>
 
-                    @if (group.status === 'AWARDED' || group.status === 'IN_PROGRESS') {
+                    @if (
+                      group.status === 'AWARDED' ||
+                      group.status === 'IN_PROGRESS'
+                    ) {
                       <div class="mt-3 grid gap-3 md:grid-cols-2">
                         <div>
-                          <label class="label !mb-1 text-xs" [for]="'log-' + job.id">
+                          <label
+                            class="label !mb-1 text-xs"
+                            [for]="'log-' + entry.id"
+                          >
                             Νέα καταγραφή εργασίας
                           </label>
                           <textarea
-                            [id]="'log-' + job.id"
+                            [id]="'log-' + entry.id"
                             rows="2"
                             class="input"
-                            [value]="noteFor(job.id) ?? ''"
-                            (input)="onNoteInput(job.id, $event)"
+                            [value]="noteFor(entry.id) ?? ''"
+                            (input)="onNoteInput(entry.id, $event)"
                           ></textarea>
                           <button
                             type="button"
                             class="btn btn-primary mt-2 !px-3 !py-1 text-xs"
                             [disabled]="saving()"
-                            (click)="addWorkLog(job.id)"
+                            (click)="addWorkLog(entry.id)"
                           >
                             Καταγραφή
                           </button>
                         </div>
                         <div>
-                          <p class="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          <p
+                            class="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500"
+                          >
                             Ημερολόγιο
                           </p>
-                          @if (logsOf(job.id); as logs) {
-                            <ol class="flex max-h-48 flex-col gap-2 overflow-y-auto border-l-2 border-slate-200 pl-4">
+                          @if (logsOf(entry.id); as logs) {
+                            <ol
+                              class="flex max-h-48 flex-col gap-2 overflow-y-auto border-l-2 border-slate-200 pl-4"
+                            >
                               @for (log of logs; track log.id) {
                                 <li class="relative text-sm">
                                   <span
                                     class="absolute top-1.5 -left-[21px] h-3 w-3 rounded-full border-2 border-white bg-slate-400"
                                   ></span>
                                   <p>{{ log.note }}</p>
-                                  <p class="text-xs text-slate-500">{{ when(log.loggedAt) }}</p>
+                                  <p class="text-xs text-slate-500">
+                                    {{ when(log.loggedAt) }}
+                                  </p>
                                 </li>
                               }
                             </ol>
                           } @else {
-                            <p class="text-xs text-slate-500">Καμία καταγραφή ακόμη.</p>
+                            <p class="text-xs text-slate-500">
+                              Καμία καταγραφή ακόμη.
+                            </p>
                           }
                         </div>
                       </div>
                     }
                   </div>
-                } @empty {
-                  <p class="text-sm text-slate-500">Καμία εργασία.</p>
                 }
               </div>
             </section>
@@ -257,64 +308,78 @@ type ProfilePayload = {
       @case ('PROFILE') {
         <h1 class="mb-4 text-xl font-bold text-slate-900">Προφίλ</h1>
         <div class="card max-w-xl">
-          @if (profile(); as p) {
-              @if (p.ratingStars !== null && p.ratingStars !== undefined) {
-              <p class="mb-4 text-sm">
-                <span class="text-amber-500">
-                  @for (star of starRange(5); track star) {
-                    <span>{{ star <= roundedStars(p.ratingStars) ? '★' : '☆' }}</span>
-                  }
-                </span>
-                {{ p.ratingStars }} / 5
-                @if ((p.ratingCount ?? null) !== null) {
-                  <span class="text-slate-500">({{ p.ratingCount }} αξιολογήσεις)</span>
-                }
+          @if (profileLoadError()) {
+            <p class="text-sm text-red-700">Αποτυχία φόρτωσης του προφίλ.</p>
+          } @else if (profileLoading()) {
+            <p class="text-sm text-slate-500">Φόρτωση…</p>
+          } @else {
+            @if (profile(); as p) {
+              @if (p.rating !== null && p.rating !== undefined) {
+                <p class="mb-4 text-sm">
+                  <span class="text-amber-500">
+                    @for (star of starRange(5); track star) {
+                      <span>{{
+                        star <= roundedStars(p.rating!) ? '★' : '☆'
+                      }}</span>
+                    }
+                  </span>
+                  {{ p.rating }} / 5
+                </p>
+              }
+            } @else {
+              <p class="mb-4 text-sm text-slate-500">
+                Δεν έχει δημιουργηθεί προφίλ ακόμη. Συμπληρώστε το παρακάτω και
+                αποθηκεύστε.
               </p>
             }
-            <form [formGroup]="profileForm" (ngSubmit)="saveProfile()" class="flex flex-col gap-4">
+            <form
+              [formGroup]="profileForm"
+              (ngSubmit)="saveProfile()"
+              class="flex flex-col gap-4"
+            >
               <div>
                 <label class="label" for="trade">Ειδικότητα</label>
-                <input id="trade" type="text" class="input" formControlName="trade" />
+                <input
+                  id="trade"
+                  type="text"
+                  class="input"
+                  formControlName="trade"
+                />
+                @if (
+                  profileForm.controls.trade.invalid &&
+                  profileForm.controls.trade.touched
+                ) {
+                  <p class="field-error">Δώστε την ειδικότητά σας.</p>
+                }
               </div>
               <div>
-                <label class="label" for="certs">Πιστοποιητικά (διαχωρισμένα με κόμμα)</label>
-                <input id="certs" type="text" class="input" formControlName="certs" />
+                <label class="label" for="certs"
+                  >Πιστοποιητικά (διαχωρισμένα με κόμμα)</label
+                >
+                <input
+                  id="certs"
+                  type="text"
+                  class="input"
+                  formControlName="certs"
+                />
                 @if (certChips().length) {
                   <div class="mt-2 flex flex-wrap gap-1">
                     @for (chip of certChips(); track chip) {
-                      <span class="badge bg-slate-200 text-slate-700">{{ chip }}</span>
+                      <span class="badge bg-slate-200 text-slate-700">{{
+                        chip
+                      }}</span>
                     }
                   </div>
                 }
               </div>
-              <div>
-                <label class="label" for="city">Πόλη</label>
-                <input id="city" type="text" class="input" formControlName="city" />
-              </div>
-              <div>
-                <label class="label" for="bio">Βιογραφικό</label>
-                <textarea id="bio" rows="3" class="input" formControlName="bio"></textarea>
-              </div>
-              <div>
-                <label class="label" for="hourlyRateCents">Ωρομίσθιο € (προαιρετικό)</label>
-                <input
-                  id="hourlyRateCents"
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  class="input"
-                  formControlName="hourlyRateCents"
-                />
-                @if (profileForm.controls.hourlyRateCents.invalid) {
-                  <p class="field-error">Το ωρομίσθιο πρέπει να είναι μη αρνητικός αριθμός.</p>
-                }
-              </div>
-              <button type="submit" class="btn btn-primary self-start" [disabled]="saving()">
-                Αποθήκευση
+              <button
+                type="submit"
+                class="btn btn-primary self-start"
+                [disabled]="saving()"
+              >
+                {{ profile() ? 'Αποθήκευση' : 'Δημιουργία προφίλ' }}
               </button>
             </form>
-          } @else {
-            <p class="text-sm text-slate-500">Φόρτωση…</p>
           }
         </div>
       }
@@ -322,33 +387,38 @@ type ProfilePayload = {
 
     <section class="mt-8" aria-label="Πληρωμές">
       <h2 class="mb-3 text-lg font-bold text-slate-900">Πληρωμές</h2>
-      @if (payouts().length === 0) {
+      @if (payoutsLoading()) {
+        <div class="card text-sm text-slate-500">Φόρτωση πληρωμών…</div>
+      } @else if (payouts().length === 0) {
         <div class="card text-sm text-slate-500">
           Δεν υπάρχουν πληρωμές για τις εργασίες σας ακόμη.
         </div>
-      }
-      <div class="card overflow-x-auto p-0">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Ημερομηνία</th>
-              <th>Εργασία</th>
-              <th>Μέθοδος</th>
-              <th>Ποσό</th>
-            </tr>
-          </thead>
-          <tbody>
-            @for (payout of payouts(); track payout.id) {
+      } @else {
+        <div class="card overflow-x-auto p-0">
+          <table class="data-table">
+            <thead>
               <tr>
-                <td>{{ when(payout.paidAt) }}</td>
-                <td class="font-medium">{{ payout.jobTitle }}</td>
-                <td>{{ methodLabel(payout.method) }}</td>
-                <td class="font-medium">{{ euros(payout.amountCents) }}</td>
+                <th>Ημερομηνία</th>
+                <th>Εργασία</th>
+                <th>Μέθοδος</th>
+                <th>Ποσό</th>
               </tr>
-            }
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              @for (payout of payouts(); track payout.id) {
+                <tr>
+                  <td>{{ when(payout.paidAt) }}</td>
+                  <td class="font-medium">{{ payout.jobTitle }}</td>
+                  <td>{{ methodLabel(payout.method) }}</td>
+                  <td class="font-medium">
+                    {{ payout.amountCents | money: payout.currency }}
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      }
     </section>
 
     @if (bidModalJob(); as job) {
@@ -364,12 +434,10 @@ type ProfilePayload = {
           <h2 class="mb-1 text-base font-semibold text-slate-900">
             Προσφορά για «{{ job.title }}»
           </h2>
-          @if (job.buildingName) {
-            <p class="mb-3 text-xs text-slate-500">{{ job.buildingName }}</p>
-          }
+          <p class="mb-3 text-xs text-slate-500">{{ job.buildingName }}</p>
           <form (ngSubmit)="submitBid()" class="flex flex-col gap-4">
             <div>
-              <label class="label" for="bidAmount">Ποσό (€)</label>
+              <label class="label" for="bidAmount">Ποσό</label>
               <input
                 id="bidAmount"
                 type="number"
@@ -379,7 +447,9 @@ type ProfilePayload = {
                 [formControl]="bidAmountCtrl"
               />
               @if (bidSubmitted() && bidAmountCtrl.invalid) {
-                <p class="field-error">Δώστε έγκυρο ποσό μεγαλύτερο του μηδενός.</p>
+                <p class="field-error">
+                  Δώστε έγκυρο ποσό μεγαλύτερο του μηδενός.
+                </p>
               }
             </div>
             <div>
@@ -399,7 +469,11 @@ type ProfilePayload = {
               >
                 Άκυρο
               </button>
-              <button type="submit" class="btn btn-primary" [disabled]="saving()">
+              <button
+                type="submit"
+                class="btn btn-primary"
+                [disabled]="saving()"
+              >
                 Υποβολή
               </button>
             </div>
@@ -421,16 +495,13 @@ export class ProviderPortalPage implements OnInit {
   private readonly jobsApi = inject(JobsApiService);
   private readonly profileApi = inject(ProviderProfileApiService);
   private readonly payoutsApi = inject(PayoutsApiService);
-  private readonly auth = inject(AuthService);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
   private readonly tour = inject(TourService);
 
-  protected readonly euros = formatEuros;
   protected readonly jobStatusBadge = jobStatusBadge;
   protected readonly methodLabel = supplierPaymentMethodLabel;
 
-  /** Ξενάγηση πρώτης χρήσης για νέους συνεργάτες. */
   protected readonly showTour = signal(this.tour.launch('provider-portal'));
   protected readonly tourSteps: HelpTourStep[] = [
     {
@@ -440,24 +511,21 @@ export class ProviderPortalPage implements OnInit {
     },
     {
       title: 'Οι καρτέλες σας',
-      body: '«Αγορά», «Οι εργασίες μου» και «Προφίλ» — όλα σε ένα μέρος.',
+      body: '«Αγορά», «Οι εργασίες μου» και «Προφίλ» — Όλα σε ένα μέρος.',
     },
   ];
 
-  protected readonly payouts = signal<MyPayoutDto[]>([]);
-
+  protected readonly payouts = signal<ProviderPayout[]>([]);
   protected readonly tab = signal<ProviderTab>('MARKET');
-
-  protected readonly marketJobs = signal<JobWithBids[]>([]);
-  protected readonly mineJobs = signal<JobWithBids[]>([]);
+  protected readonly marketJobs = signal<ProviderMarketJob[]>([]);
+  protected readonly mineJobs = signal<ProviderMineJob[]>([]);
   protected readonly workLogs = signal<Record<string, WorkLogView[]>>({});
   protected readonly workLogNotes = signal<Record<string, string>>({});
   protected readonly editAmounts = signal<Record<string, string>>({});
   protected readonly editMessages = signal<Record<string, string>>({});
-
   protected readonly profile = signal<ProviderProfile | null>(null);
 
-  protected readonly bidModalJob = signal<JobWithBids | null>(null);
+  protected readonly bidModalJob = signal<ProviderMarketJob | null>(null);
   protected readonly bidAmountCtrl = this.fb.control<number | null>(null, [
     Validators.required,
     Validators.min(0.01),
@@ -466,115 +534,79 @@ export class ProviderPortalPage implements OnInit {
   protected readonly bidSubmitted = signal(false);
 
   protected readonly profileForm = this.fb.nonNullable.group({
-    trade: [''],
+    trade: ['', [Validators.required, Validators.maxLength(100)]],
     certs: [''],
-    city: [''],
-    bio: [''],
-    hourlyRateCents: this.fb.control<number | null>(null, [Validators.min(0)]),
   });
 
   protected readonly saving = signal(false);
   protected readonly loading = signal(true);
+  protected readonly loadError = signal(false);
+  protected readonly profileLoading = signal(true);
+  protected readonly profileLoadError = signal(false);
+  protected readonly payoutsLoading = signal(true);
 
-  private readonly userId = computed(() => this.auth.currentUser()?.id ?? null);
-
-  protected readonly certChips = computed(() =>
-    parseCerts(this.profileForm.controls.certs.value),
-  );
+  protected certChips(): string[] {
+    return parseCerts(this.profileForm.controls.certs.value);
+  }
 
   ngOnInit(): void {
-    forkJoin({
-      market: this.jobsApi.marketplace().pipe(catchError(() => EMPTY)),
-      mine: this.jobsApi.mine().pipe(catchError(() => EMPTY)),
-    }).subscribe(({ market, mine }) => {
-      this.marketJobs.set(market ?? []);
-      this.mineJobs.set(mine ?? []);
-      this.loading.set(false);
-      this.loadMineWorkLogs();
-    });
-    this.payoutsApi
-      .mine()
-      .pipe(catchError(() => EMPTY))
-      .subscribe((payouts) => this.payouts.set(payouts));
+    this.reloadJobs();
+    this.loadPayouts();
     this.profileApi
       .get()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.profileError();
+          return of(null);
+        }),
+      )
       .subscribe((profile) => {
         this.profile.set(profile);
-        const extras = profile as ProviderProfile & ProfileExtras;
         this.profileForm.reset({
-          trade: profile.trade ?? '',
-          certs: profile.certs.join(', '),
-          city: extras.city ?? '',
-          bio: extras.bio ?? '',
-          hourlyRateCents:
-            extras.hourlyRateCents !== null && extras.hourlyRateCents !== undefined
-              ? extras.hourlyRateCents / 100
-              : null,
+          trade: profile?.trade ?? '',
+          certs: profile?.certs.join(', ') ?? '',
         });
+        this.profileLoading.set(false);
       });
   }
 
-  protected readonly mineGroups = computed(() => {
-    const jobs = this.mineJobs();
-    const groups: { status: JobStatus; label: string; jobs: JobWithBids[] }[] = [
+  protected readonly mineGroups = computed<ProviderMineGroup[]>(() => {
+    const groups: ProviderMineGroup[] = [
       { status: 'AWARDED', label: 'Ανατεθειμένες', jobs: [] },
       { status: 'IN_PROGRESS', label: 'Σε εξέλιξη', jobs: [] },
       { status: 'COMPLETED', label: 'Ολοκληρωμένες', jobs: [] },
     ];
-    for (const job of jobs) {
-      const group = groups.find((g) => g.status === job.status);
-      if (group) group.jobs.push(job);
+    for (const entry of this.mineJobs()) {
+      const group = groups.find(
+        (candidate) => candidate.status === entry.status,
+      );
+      if (group) group.jobs.push(entry);
     }
     return groups.filter((group) => group.jobs.length > 0);
   });
 
-  protected loadMineWorkLogs(): void {
-    const targets = this.mineJobs().filter(
-      (job) => job.status === 'AWARDED' || job.status === 'IN_PROGRESS',
-    );
-    if (!targets.length) return;
-    forkJoin(
-      targets.map((job) =>
-        this.jobsApi.workLogs(job.id).pipe(
-          catchError(() => EMPTY),
-          map((logs) => [job.id, logs] as const),
-        ),
-      ),
-    ).subscribe((pairs) => {
-      this.workLogs.update((current) => ({
-        ...current,
-        ...Object.fromEntries(pairs),
-      }));
-    });
+  protected ownBid(job: ProviderMarketJob): ProviderBidView | null {
+    return findOwnActiveBid(job);
   }
 
-  protected ownBid(job: JobWithBids) {
-    return findOwnActiveBid(job, this.userId());
-  }
-
-  /** Logs of a job, or null when there is none yet (pure). */
   protected logsOf(jobId: string): WorkLogView[] | null {
     const logs = this.workLogs()[jobId];
     return logs && logs.length > 0 ? logs : null;
   }
 
-  /** Draft bid amount for a job (undefined when untouched). */
-  protected editAmount(jobId: string): string | undefined {
-    return this.editAmounts()[jobId];
+  protected editAmount(jobId: string, bid: ProviderBidView): string {
+    return this.editAmounts()[jobId] ?? (bid.amountCents / 100).toFixed(2);
   }
 
-  /** Draft bid message for a job (undefined when untouched). */
-  protected editMessage(jobId: string): string | undefined {
-    return this.editMessages()[jobId];
+  protected editMessage(jobId: string, bid: ProviderBidView): string {
+    return this.editMessages()[jobId] ?? bid.message ?? '';
   }
 
-  /** Draft work-log note for a job (undefined when untouched). */
   protected noteFor(jobId: string): string | undefined {
     return this.workLogNotes()[jobId];
   }
 
-  protected openBidModal(job: JobWithBids): void {
+  protected openBidModal(job: ProviderMarketJob): void {
     this.bidSubmitted.set(false);
     this.bidAmountCtrl.reset(null);
     this.bidMessageCtrl.reset('');
@@ -604,23 +636,27 @@ export class ProviderPortalPage implements OnInit {
         this.toast.success('Η προσφορά υποβλήθηκε.');
         this.saving.set(false);
         this.bidModalJob.set(null);
-        this.reloadMarket();
+        this.reloadJobs();
       });
   }
 
   protected onEditAmount(jobId: string, event: Event): void {
     const value = (event.target as HTMLInputElement).value;
-    this.editAmounts.update((m) => ({ ...m, [jobId]: value }));
+    this.editAmounts.update((drafts) => ({ ...drafts, [jobId]: value }));
   }
 
   protected onEditMessage(jobId: string, event: Event): void {
     const value = (event.target as HTMLInputElement).value;
-    this.editMessages.update((m) => ({ ...m, [jobId]: value }));
+    this.editMessages.update((drafts) => ({ ...drafts, [jobId]: value }));
   }
 
   protected updateBid(jobId: string): void {
-    const raw = this.editAmounts()[jobId];
-    const cents = eurosToCents(raw ?? '');
+    const currentJob = this.marketJobs().find((job) => job.id === jobId);
+    const currentBid = currentJob ? this.ownBid(currentJob) : null;
+    const raw =
+      this.editAmounts()[jobId] ??
+      (currentBid ? (currentBid.amountCents / 100).toFixed(2) : '');
+    const cents = eurosToCents(raw);
     if (!Number.isFinite(cents) || cents <= 0) {
       this.toast.error('Δώστε έγκυρο ποσό.');
       return;
@@ -642,13 +678,13 @@ export class ProviderPortalPage implements OnInit {
       .subscribe(() => {
         this.toast.success('Η προσφορά ενημερώθηκε.');
         this.saving.set(false);
-        this.reloadMarket();
+        this.reloadJobs();
       });
   }
 
   protected onNoteInput(jobId: string, event: Event): void {
     const value = (event.target as HTMLTextAreaElement).value;
-    this.workLogNotes.update((m) => ({ ...m, [jobId]: value }));
+    this.workLogNotes.update((drafts) => ({ ...drafts, [jobId]: value }));
   }
 
   protected addWorkLog(jobId: string): void {
@@ -668,7 +704,7 @@ export class ProviderPortalPage implements OnInit {
       .subscribe((log) => {
         this.toast.success('Η καταγραφή αποθηκεύτηκε.');
         this.saving.set(false);
-        this.workLogNotes.update((m) => ({ ...m, [jobId]: '' }));
+        this.workLogNotes.update((drafts) => ({ ...drafts, [jobId]: '' }));
         this.workLogs.update((current) => ({
           ...current,
           [jobId]: [...(current[jobId] ?? []), log],
@@ -677,25 +713,14 @@ export class ProviderPortalPage implements OnInit {
   }
 
   protected saveProfile(): void {
-    if (this.saving()) return;
-    const rate = this.profileForm.controls.hourlyRateCents;
-    if (rate.invalid) {
-      this.toast.error('Το ωρομίσθιο πρέπει να είναι μη αρνητικός αριθμός.');
+    if (this.saving() || this.profileForm.invalid) {
+      this.profileForm.markAllAsTouched();
       return;
     }
     this.saving.set(true);
-    const { trade, certs, city, bio, hourlyRateCents } = this.profileForm.getRawValue();
-    const payload: ProfilePayload = {
-      trade: trade.trim(),
-      certs: parseCerts(certs),
-    };
-    if (city.trim()) payload.city = city.trim();
-    if (bio.trim()) payload.bio = bio.trim();
-    if (hourlyRateCents !== null && hourlyRateCents >= 0) {
-      payload.hourlyRateCents = eurosToCents(hourlyRateCents);
-    }
+    const { trade, certs } = this.profileForm.getRawValue();
     this.profileApi
-      .update(payload)
+      .update({ trade: trade.trim(), certs: parseCerts(certs) })
       .pipe(
         catchError(() => {
           this.toast.error('Η αποθήκευση απέτυχε.');
@@ -704,7 +729,11 @@ export class ProviderPortalPage implements OnInit {
         }),
       )
       .subscribe((profile) => {
-        this.toast.success('Το προφίλ αποθηκεύτηκε.');
+        this.toast.success(
+          this.profile()
+            ? 'Το προφίλ αποθηκεύτηκε.'
+            : 'Το προφίλ δημιουργήθηκε.',
+        );
         this.profile.set(profile);
         this.saving.set(false);
       });
@@ -720,14 +749,73 @@ export class ProviderPortalPage implements OnInit {
 
   protected when(iso: string | undefined): string {
     return iso
-      ? new Date(iso).toLocaleString('el-GR', { dateStyle: 'short', timeStyle: 'short' })
+      ? new Date(iso).toLocaleString('el-GR', {
+          dateStyle: 'short',
+          timeStyle: 'short',
+        })
       : '';
   }
 
-  private reloadMarket(): void {
-    this.jobsApi
-      .marketplace()
-      .pipe(catchError(() => EMPTY))
-      .subscribe((jobs) => this.marketJobs.set(jobs));
+  private reloadJobs(): void {
+    this.loading.set(true);
+    this.loadError.set(false);
+    forkJoin({
+      market: this.jobsApi.marketplace().pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          return of<ProviderMarketJob[]>([]);
+        }),
+      ),
+      mine: this.jobsApi.mine().pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          return of<ProviderMineJob[]>([]);
+        }),
+      ),
+    }).subscribe(({ market, mine }) => {
+      this.marketJobs.set(market);
+      this.mineJobs.set(mine);
+      this.loading.set(false);
+      this.loadMineWorkLogs();
+    });
+  }
+
+  private loadMineWorkLogs(): void {
+    const targets = this.mineJobs().filter(
+      (entry) => entry.status === 'AWARDED' || entry.status === 'IN_PROGRESS',
+    );
+    if (!targets.length) return;
+    forkJoin(
+      targets.map((entry) =>
+        this.jobsApi.workLogs(entry.id).pipe(
+          catchError(() => of<WorkLogView[]>([])),
+          map((logs) => [entry.id, logs] as const),
+        ),
+      ),
+    ).subscribe((pairs) => {
+      this.workLogs.update((current) => ({
+        ...current,
+        ...Object.fromEntries(pairs),
+      }));
+    });
+  }
+
+  private loadPayouts(): void {
+    this.payoutsApi
+      .mine()
+      .pipe(
+        catchError(() => {
+          this.payouts.set([]);
+          return of<ProviderPayout[]>([]);
+        }),
+      )
+      .subscribe((payouts) => {
+        this.payouts.set(payouts);
+        this.payoutsLoading.set(false);
+      });
+  }
+
+  private profileError(): void {
+    this.profileLoadError.set(true);
   }
 }

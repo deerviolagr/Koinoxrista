@@ -98,39 +98,31 @@ describe('InvoicesService', () => {
       { shares: [{ unitId: 'unit-a', amountCents: 600 }, { unitId: 'unit-b', amountCents: 400 }] },
       { shares: [{ unitId: 'unit-a', amountCents: 25 }] },
     ]);
-    prisma.invoice.findMany.mockResolvedValue([
-      { unitId: 'unit-a', paidCents: 0 },
-      { unitId: 'unit-b', paidCents: 0 },
-    ]);
+    prisma.invoice.findMany.mockResolvedValue([]);
 
     await service.run('building-1', { periodYearMonth: '2026-08' }, user());
 
     const upserts = prisma.invoice.upsert.mock.calls.map((c) => c[0]);
     const byUnit = new Map(upserts.map((u) => [u.where.unitId_periodYearMonth.unitId, u]));
     expect(byUnit.get('unit-a').create.totalCents).toBe(625);
-    expect(byUnit.get('unit-a').update.status).toBe(PaymentStatus.PENDING);
+    expect(byUnit.get('unit-a').create.status).toBe(PaymentStatus.PENDING);
+    expect(byUnit.get('unit-a').update).toEqual({});
     expect(byUnit.get('unit-b').create.totalCents).toBe(400);
   });
 
-  it('preserves paidCents and keeps PAID invoices paid on re-run', async () => {
+  it('rejects a changed paid period without repricing', async () => {
     prisma.expense.findMany.mockResolvedValue([
-      { shares: [{ unitId: 'unit-a', amountCents: 625 }, { unitId: 'unit-b', amountCents: 375 }] },
+      { shares: [{ unitId: 'unit-a', amountCents: 700 }, { unitId: 'unit-b', amountCents: 300 }] },
     ]);
     prisma.invoice.findMany.mockResolvedValue([
-      { unitId: 'unit-a', paidCents: 625 },
-      { unitId: 'unit-b', paidCents: 100 },
+      { unitId: 'unit-a', totalCents: 625, paidCents: 625 },
+      { unitId: 'unit-b', totalCents: 375, paidCents: 100 },
     ]);
 
-    await service.run('building-1', { periodYearMonth: '2026-08' }, user());
-
-    const upserts = prisma.invoice.upsert.mock.calls.map((c) => c[0]);
-    const byUnit = new Map(upserts.map((u) => [u.where.unitId_periodYearMonth.unitId, u]));
-    expect(byUnit.get('unit-a').update).toEqual({
-      totalCents: 625,
-      status: PaymentStatus.PAID,
-    });
-    expect(byUnit.get('unit-b').update.status).toBe(PaymentStatus.PENDING);
-    expect(JSON.stringify(byUnit.get('unit-a').update)).not.toContain('paidCents');
+    await expect(
+      service.run('building-1', { periodYearMonth: '2026-08' }, user()),
+    ).rejects.toThrow(BadRequestException);
+    expect(prisma.invoice.upsert).not.toHaveBeenCalled();
   });
 
   it('notifies each distinct unit owner exactly once after a successful run', async () => {
@@ -144,11 +136,15 @@ describe('InvoicesService', () => {
 
     await service.run('building-1', { periodYearMonth: '2026-08' }, user());
 
-    expect(prisma.ownership.findMany).toHaveBeenCalledWith({
-      where: { unit: { buildingId: 'building-1' } },
-      select: { userId: true },
-      distinct: ['userId'],
-    });
+    expect(prisma.ownership.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          unit: { buildingId: 'building-1' },
+          AND: expect.any(Array),
+        }),
+        distinct: ['userId'],
+      }),
+    );
     expect(notifications.createForUsers).toHaveBeenCalledWith(
       ['owner-1', 'owner-2'],
       {
@@ -175,13 +171,22 @@ describe('InvoicesService', () => {
 
     await service.findMine('2026-07', user({ role: 'RESIDENT', id: 'resident-1' }));
 
-    expect(prisma.ownership.findMany).toHaveBeenCalledWith({
-      where: { userId: 'resident-1' },
-      select: { unitId: true },
-    });
+    expect(prisma.ownership.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          userId: 'resident-1',
+          unit: { buildingId: 'building-1' },
+          AND: expect.any(Array),
+        }),
+      }),
+    );
     expect(prisma.invoice.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { unitId: { in: ['unit-a', 'unit-b'] }, periodYearMonth: '2026-07' },
+        where: {
+          buildingId: 'building-1',
+          unitId: { in: ['unit-a', 'unit-b'] },
+          periodYearMonth: '2026-07',
+        },
         orderBy: { periodYearMonth: 'desc' },
       }),
     );

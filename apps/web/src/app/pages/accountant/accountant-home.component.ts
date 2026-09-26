@@ -14,13 +14,23 @@ import {
   AccountantBuildingDto,
   AccountantReportSummary,
 } from '../../core/api/accountant-api.service';
-import { formatEuros } from '../../ui/format';
+import { MoneyPipe } from '../../ui/money.pipe';
 
 type Tab = 'summary' | 'payouts' | 'arrears';
 
 const MONTHS_EL = [
-  'Ιαν', 'Φεβ', 'Μάρ', 'Απρ', 'Μάι', 'Ιούν',
-  'Ιούλ', 'Αύγ', 'Σεπ', 'Οκτ', 'Νοέ', 'Δεκ',
+  'Ιαν',
+  'Φεβ',
+  'Μάρ',
+  'Απρ',
+  'Μάι',
+  'Ιούν',
+  'Ιούλ',
+  'Αύγ',
+  'Σεπ',
+  'Οκτ',
+  'Νοέ',
+  'Δεκ',
 ];
 
 /** "2026-03" → "Μάρ 2026" (pure). */
@@ -35,6 +45,7 @@ export function shortMonthLabel(periodYearMonth: string): string {
  */
 @Component({
   selector: 'app-accountant-home',
+  imports: [MoneyPipe],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="mb-6 flex flex-wrap items-end justify-between gap-3">
@@ -122,7 +133,7 @@ export function shortMonthLabel(periodYearMonth: string): string {
                   Ταμειακές εκκρεμότητες
                 </p>
                 <p class="mt-1 text-lg font-bold text-slate-900">
-                  {{ euros(s.totals.arrearsCents) }}
+                  {{ s.totals.arrearsCents | money: currency() }}
                 </p>
               </div>
               <div class="card">
@@ -130,7 +141,7 @@ export function shortMonthLabel(periodYearMonth: string): string {
                   Εισπραχθέντα
                 </p>
                 <p class="mt-1 text-lg font-bold text-emerald-700">
-                  {{ euros(s.totals.collectedCents) }}
+                  {{ s.totals.collectedCents | money: currency() }}
                 </p>
               </div>
               <div class="card">
@@ -156,13 +167,17 @@ export function shortMonthLabel(periodYearMonth: string): string {
                   @for (point of s.periods; track point.periodYearMonth) {
                     <tr>
                       <td>{{ monthLabel(point.periodYearMonth) }}</td>
-                      <td class="text-right">{{ euros(point.invoicedCents) }}</td>
-                      <td class="text-right">{{ euros(point.collectedCents) }}</td>
+                      <td class="text-right">
+                        {{ point.invoicedCents | money: currency() }}
+                      </td>
+                      <td class="text-right">
+                        {{ point.collectedCents | money: currency() }}
+                      </td>
                       <td
                         class="text-right"
                         [class.text-red-700]="point.arrearsCents > 0"
                       >
-                        {{ euros(point.arrearsCents) }}
+                        {{ point.arrearsCents | money: currency() }}
                       </td>
                     </tr>
                   }
@@ -170,9 +185,15 @@ export function shortMonthLabel(periodYearMonth: string): string {
                 <tfoot>
                   <tr class="font-semibold text-slate-900">
                     <td>ΣΥΝΟΛΟ</td>
-                    <td class="text-right">{{ euros(s.totals.invoicedCents) }}</td>
-                    <td class="text-right">{{ euros(s.totals.collectedCents) }}</td>
-                    <td class="text-right">{{ euros(s.totals.arrearsCents) }}</td>
+                    <td class="text-right">
+                      {{ s.totals.invoicedCents | money: currency() }}
+                    </td>
+                    <td class="text-right">
+                      {{ s.totals.collectedCents | money: currency() }}
+                    </td>
+                    <td class="text-right">
+                      {{ s.totals.arrearsCents | money: currency() }}
+                    </td>
                   </tr>
                 </tfoot>
               </table>
@@ -183,7 +204,7 @@ export function shortMonthLabel(periodYearMonth: string): string {
                 <div class="flex items-center justify-between py-1 text-sm">
                   <span class="text-slate-700">{{ row.categoryName }}</span>
                   <span class="font-medium text-slate-900">
-                    {{ euros(row.totalCents) }}
+                    {{ row.totalCents | money: currency() }}
                   </span>
                 </div>
               } @empty {
@@ -200,7 +221,7 @@ export function shortMonthLabel(periodYearMonth: string): string {
                   Πληρωμές προμηθευτών {{ year() }}
                 </p>
                 <p class="mt-1 text-lg font-bold text-slate-900">
-                  {{ euros(p.totalCents) }}
+                  {{ p.totalCents | money: currency() }}
                 </p>
               </div>
               <div class="card">
@@ -208,7 +229,9 @@ export function shortMonthLabel(periodYearMonth: string): string {
                 @for (m of p.byMethod; track m.method) {
                   <div class="flex justify-between py-0.5 text-sm">
                     <span class="text-slate-600">{{ m.method }}</span>
-                    <span class="font-medium">{{ euros(m.totalCents) }}</span>
+                    <span class="font-medium">{{
+                      m.totalCents | money: currency()
+                    }}</span>
                   </div>
                 } @empty {
                   <p class="text-sm text-slate-500">Καμία πληρωμή.</p>
@@ -227,7 +250,9 @@ export function shortMonthLabel(periodYearMonth: string): string {
                   @for (m of p.byMonth; track m.month) {
                     <tr>
                       <td>{{ monthLabel(m.month) }}</td>
-                      <td class="text-right">{{ euros(m.totalCents) }}</td>
+                      <td class="text-right">
+                        {{ m.totalCents | money: currency() }}
+                      </td>
                     </tr>
                   } @empty {
                     <tr>
@@ -251,7 +276,7 @@ export function shortMonthLabel(periodYearMonth: string): string {
                 class="mt-1 text-lg font-bold"
                 [class.text-red-700]="r.totalOutstandingCents > 0"
               >
-                {{ euros(r.totalOutstandingCents) }}
+                {{ r.totalOutstandingCents | money: currency() }}
               </p>
             </div>
             <div class="card overflow-x-auto p-0">
@@ -272,10 +297,10 @@ export function shortMonthLabel(periodYearMonth: string): string {
                         <td class="font-medium">{{ row.unitLabel }}</td>
                         <td>{{ ownerNames(row.ownerNames) }}</td>
                         <td class="text-right text-red-700">
-                          {{ euros(row.outstandingCents) }}
+                          {{ row.outstandingCents | money: currency() }}
                         </td>
                         <td class="text-right">
-                          {{ euros(row.bucket90PlusCents) }}
+                          {{ row.bucket90PlusCents | money: currency() }}
                         </td>
                         <td>{{ row.oldestUnpaidPeriod ?? '—' }}</td>
                       </tr>
@@ -299,8 +324,6 @@ export function shortMonthLabel(periodYearMonth: string): string {
 export class AccountantHomePage implements OnInit {
   private readonly accountantApi = inject(AccountantApiService);
   private readonly router = inject(Router);
-
-  protected readonly euros = formatEuros;
 
   protected readonly tabs: { id: Tab; label: string }[] = [
     { id: 'summary', label: 'Σύνοψη περιόδου' },
@@ -327,6 +350,12 @@ export class AccountantHomePage implements OnInit {
   protected readonly arrearsReport = signal<ArrearsReport | null>(null);
 
   protected readonly canLoad = computed(() => this.buildingId() !== '');
+  protected readonly currency = computed(
+    () =>
+      this.buildings().find(
+        (building) => building.buildingId === this.buildingId(),
+      )?.currency,
+  );
 
   ngOnInit(): void {
     this.accountantApi

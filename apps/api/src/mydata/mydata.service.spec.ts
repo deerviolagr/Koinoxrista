@@ -16,6 +16,14 @@ import { buildMyDataXml } from './mydata.xml';
 const sha1Mark = (invoiceId: string): string =>
   `4000${createHash('sha1').update(invoiceId).digest('hex').slice(0, 12).toUpperCase()}`;
 
+beforeEach(() => {
+  process.env.MYDATA_VAT_RATE_BPS = '2400';
+});
+
+afterEach(() => {
+  delete process.env.MYDATA_VAT_RATE_BPS;
+});
+
 const paidInvoice = (overrides: Record<string, unknown> = {}) => ({
   id: 'invoice-1',
   paidCents: 12_400,
@@ -37,6 +45,9 @@ function makePrisma() {
   };
   return {
     tx,
+    building: {
+      findUnique: jest.fn().mockResolvedValue({ market: 'GR', currency: 'EUR' }),
+    },
     invoice: {
       findMany: jest.fn().mockResolvedValue([paidInvoice()]),
     },
@@ -58,7 +69,7 @@ describe('computeNetVat', () => {
     [9_999, 8_064, 1_935],
     [123_456, 99_561, 23_895],
   ])('splits %i cents into net %i + vat %i exactly', (paid, net, vat) => {
-    expect(computeNetVat(paid)).toEqual({
+    expect(computeNetVat(paid, 2400)).toEqual({
       netAmountCents: net,
       vatAmountCents: vat,
     });
@@ -66,11 +77,16 @@ describe('computeNetVat', () => {
 
   it('never loses a cent for arbitrary amounts', () => {
     for (let paid = 0; paid <= 500; paid += 7) {
-      const { netAmountCents, vatAmountCents } = computeNetVat(paid);
+      const { netAmountCents, vatAmountCents } = computeNetVat(paid, 2400);
       expect(netAmountCents + vatAmountCents).toBe(paid);
       expect(netAmountCents).toBeGreaterThanOrEqual(0);
       expect(vatAmountCents).toBeGreaterThanOrEqual(0);
     }
+  });
+
+  it('does not assume a VAT rate', () => {
+    expect(() => computeNetVat(12_400)).toThrow(/VAT rate/);
+    expect(() => computeNetVat(12_400, 10_001)).toThrow(RangeError);
   });
 });
 
@@ -184,6 +200,16 @@ describe('MyDataService.generateForPeriod', () => {
     expect(data.responseRaw).toContain('AADE rejected invoice');
   });
 
+  it('rejects non-Greek buildings before reading invoices or submitting', async () => {
+    prisma.building.findUnique.mockResolvedValue({ market: 'US', currency: 'USD' });
+
+    await expect(
+      service.generateForPeriod('building-1', '2026-07'),
+    ).rejects.toThrow(/only.*Greek|market=GR/);
+    expect(prisma.invoice.findMany).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
   it('rejects a malformed period with 400', async () => {
     await expect(
       service.generateForPeriod('building-1', '26-07'),
@@ -235,6 +261,7 @@ describe('MyDataService.xmlForPeriod', () => {
           classificationType: 'E3_561_001',
           netAmountCents: 10_000,
           vatAmountCents: 2_400,
+          currency: 'EUR',
         },
       ]),
     );

@@ -5,13 +5,31 @@
   "projectType": "application",
   "targets": {
     "e2e": {
-      "executor": "@nx/jest:jest",
-      "outputs": ["{workspaceRoot}/coverage/{e2eProjectRoot}"],
+      "executor": "nx:run-commands",
+      "cache": false,
+      "inputs": [
+        "production",
+        "^production",
+        "{workspaceRoot}/apps/api/prisma/schema.prisma",
+        "{workspaceRoot}/apps/api/prisma/migrations/**/*",
+        "{workspaceRoot}/apps/api-e2e/**/*",
+        { "externalDependencies": ["axios", "@prisma/client"] }
+      ],
+      "outputs": ["{workspaceRoot}/coverage/api-e2e"],
+      "dependsOn": ["api:build:development"],
       "options": {
-        "jestConfig": "apps/api-e2e/jest.config.cts",
-        "passWithNoTests": true
-      },
-      "dependsOn": ["api:build", "api:serve"]
+        "command": "pnpm exec jest --config apps/api-e2e/jest.config.cts --runInBand",
+        "env": {
+          "HOST": "127.0.0.1",
+          "PORT": "3000",
+          "E2E_HOST": "127.0.0.1",
+          "E2E_PORT": "3000",
+          "RATE_LOGIN_LIMIT": "100",
+          "RATE_LOGIN_TTL_MS": "60000",
+          "THROTTLE_LIMIT": "1000",
+          "THROTTLE_TTL_MS": "60000"
+        }
+      }
     }
   }
 }

@@ -1,5 +1,7 @@
-/** Strategies a recurring template may use (subset of AllocationStrategy). */
-export type RecurringStrategy = 'MILIMES' | 'UNITS';
+import type { AllocationStrategy } from './domain';
+
+/** Strategies accepted by recurring expense templates. */
+export type RecurringStrategy = AllocationStrategy;
 
 /** A recurring expense template: auto-billed into Expense + Shares per period. */
 export interface RecurringExpenseDto {

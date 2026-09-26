@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { ActivatedRoute, RouterLink } from '@angular/router';
 import { EMPTY, catchError, forkJoin, map } from 'rxjs';
 import { Bid, CreateJobDto, JobStatus, WorkLogView } from '@org/shared';
 import {
@@ -11,7 +12,8 @@ import {
 import { BuildingsApiService } from '../../core/api/buildings-api.service';
 import { ConfirmModalComponent } from '../../ui/confirm-modal.component';
 import { ToastService } from '../../ui/toast.service';
-import { eurosToCents, formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
+import { eurosToCents } from '../../ui/format';
 
 type JobsTab = 'OPEN' | 'ACTIVE' | 'DONE';
 
@@ -29,7 +31,7 @@ export function jobsForTab(jobs: JobWithBids[], tab: JobsTab): JobWithBids[] {
 
 @Component({
   selector: 'app-admin-jobs',
-  imports: [ReactiveFormsModule, ConfirmModalComponent],
+  imports: [ReactiveFormsModule, ConfirmModalComponent, RouterLink],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="mb-6 flex items-center justify-between">
@@ -58,7 +60,7 @@ export function jobsForTab(jobs: JobWithBids[], tab: JobsTab): JobWithBids[] {
             }
           </div>
           <div>
-            <label class="label" for="budget">Προϋπολογισμός € (προαιρετικό)</label>
+            <label class="label" for="budget">Προϋπολογισμός {{ currency() }} (προαιρετικό)</label>
             <input id="budget" type="number" min="0" step="0.01" class="input" formControlName="budget" />
           </div>
           <div class="flex items-end">
@@ -70,6 +72,13 @@ export function jobsForTab(jobs: JobWithBids[], tab: JobsTab): JobWithBids[] {
       </div>
     }
 
+    @if (requestedProviderId(); as providerId) {
+      <div class="card mb-4 border-blue-200 bg-blue-50 text-sm text-blue-800">
+        Νέα εργασία για δημόσια προκήρυξη. Ο τεχνικός
+        <span class="font-medium">{{ providerId }}</span> μπορεί να υποβάλει
+        προσφορά μέσω της αγοράς.
+      </div>
+    }
     <div class="mb-4 flex gap-2">
       @for (t of tabKeys; track t) {
         <button
@@ -88,7 +97,10 @@ export function jobsForTab(jobs: JobWithBids[], tab: JobsTab): JobWithBids[] {
       <div class="card text-sm text-slate-500">Φόρτωση…</div>
     } @else if (error()) {
       <div class="card border-red-200 bg-red-50 text-sm text-red-700">
-        Αποτυχία φόρτωσης εργασιών.
+        <p>Αποτυχία φόρτωσης εργασιών.</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="reload()">
+          Δοκιμή ξανά
+        </button>
       </div>
     } @else {
       <div class="flex flex-col gap-4">
@@ -108,6 +120,16 @@ export function jobsForTab(jobs: JobWithBids[], tab: JobsTab): JobWithBids[] {
                 Προϋπολογισμός: {{ euros(job.budgetCents) }}
               </p>
             }
+            @if (job.source === 'RESIDENT_REPORT') {
+              <button
+                type="button"
+                class="btn btn-secondary mt-2 !px-3 !py-1 text-xs"
+                [disabled]="convertingId() === job.id"
+                (click)="convertToRfp(job)"
+              >
+                {{ convertingId() === job.id ? 'Μετατροπή…' : 'Μετατροπή σε δημόσια προκήρυξη' }}
+              </button>
+            }
 
             @if ((job.bids?.length ?? 0) > 0 && tab() === 'OPEN') {
               <h3 class="card-title mt-4">Προσφορές</h3>
@@ -125,7 +147,13 @@ export function jobsForTab(jobs: JobWithBids[], tab: JobsTab): JobWithBids[] {
                   <tbody>
                     @for (bid of job.bids; track bid.id) {
                       <tr>
-                        <td class="font-medium">{{ bid.providerName ?? '—' }}</td>
+                        <td class="font-medium">
+                          <a
+                            class="text-indigo-700 hover:underline"
+                            [routerLink]="['/admin/directory']"
+                            [queryParams]="{ provider: bid.providerUserId }"
+                          >{{ bid.providerName ?? bid.providerUserId }}</a>
+                        </td>
                         <td>{{ bid.providerTrade || '—' }}</td>
                         <td>{{ euros(bid.amountCents) }}</td>
                         <td>{{ bid.message || '—' }}</td>
@@ -250,11 +278,14 @@ export function jobsForTab(jobs: JobWithBids[], tab: JobsTab): JobWithBids[] {
 })
 export class AdminJobsPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly jobsApi = inject(JobsApiService);
+  private readonly route = inject(ActivatedRoute);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
   protected readonly jobStatusBadge = jobStatusBadge;
   protected readonly bidStatusBadge = bidStatusBadge;
 
@@ -278,6 +309,8 @@ export class AdminJobsPage implements OnInit {
     accept: boolean;
   } | null>(null);
   protected readonly confirmComplete = signal<JobWithBids | null>(null);
+  protected readonly convertingId = signal<string | null>(null);
+  protected readonly requestedProviderId = signal<string | null>(null);
 
   protected readonly form = this.fb.nonNullable.group({
     title: ['', Validators.required],
@@ -294,6 +327,7 @@ export class AdminJobsPage implements OnInit {
   private buildingId: string | null = null;
 
   ngOnInit(): void {
+    this.requestedProviderId.set(this.route.snapshot.queryParamMap.get('provider'));
     this.buildingsApi
       .mine()
       .pipe(
@@ -434,6 +468,22 @@ export class AdminJobsPage implements OnInit {
         );
         this.reload();
       });
+  }
+
+  protected convertToRfp(job: JobWithBids): void {
+    if (this.convertingId() || job.source !== 'RESIDENT_REPORT') return;
+    this.convertingId.set(job.id);
+    this.jobsApi.convertToRfp(job.id).subscribe({
+      next: () => {
+        this.convertingId.set(null);
+        this.toast.success('Η αναφορά μετατράπηκε σε δημόσια προκήρυξη.');
+        this.reload();
+      },
+      error: () => {
+        this.convertingId.set(null);
+        this.toast.error('Η μετατροπή σε δημόσια προκήρυξη απέτυχε.');
+      },
+    });
   }
 
   protected completeJob(): void {

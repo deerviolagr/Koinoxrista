@@ -8,6 +8,14 @@ import {
 import { AuthenticatedUser } from '../auth/auth.types';
 import { assertSameBuilding } from '../common/tenant';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  effectiveOwnershipWhere,
+  endOfBillingYear,
+  isEffectiveOwnership,
+  ownershipWindowWhere,
+  overlapsOwnershipPeriod,
+  requireActiveBuildingId,
+} from '../ownerships/ownership-scope';
 import { ArrearsService } from '../payments/arrears.service';
 import { buildLedgerRows, ledgerTotals } from './build-ledger';
 import { toCsv } from './csv';
@@ -197,28 +205,58 @@ export class ExportsService {
   async myUnitStatement(
     year: string,
     user: AuthenticatedUser,
+    unitId?: string,
   ): Promise<UnitYearStatement> {
     if (!YEAR_REGEX.test(year)) {
       throw new BadRequestException('year must match YYYY');
     }
+    const buildingId = requireActiveBuildingId(user);
+    const at = endOfBillingYear(year);
+    const ownerships = await this.prisma.ownership.findMany({
+      where: effectiveOwnershipWhere(user.id, buildingId, at),
+    });
+    const ownedUnitIds = [
+      ...new Set(
+        ownerships
+          .filter((ownership) => isEffectiveOwnership(ownership, at))
+          .map((ownership) => ownership.unitId),
+      ),
+    ];
+    if (ownedUnitIds.length === 0) {
+      throw new ForbiddenException('User has no effective ownership in the active building');
+    }
+    if (unitId && !ownedUnitIds.includes(unitId)) {
+      throw new ForbiddenException('You do not own the requested unit');
+    }
+    if (!unitId && ownedUnitIds.length > 1) {
+      throw new BadRequestException(
+        'Multiple units are owned; specify unitId for the statement',
+      );
+    }
+
+    const [onlyOwnedUnitId] = ownedUnitIds;
+    const selectedUnitId = unitId ?? onlyOwnedUnitId;
+    if (!selectedUnitId) {
+      throw new ForbiddenException('User has no effective ownership in the active building');
+    }
     const units = await this.prisma.unit.findMany({
-      where: { ownerships: { some: { userId: user.id } } },
+      where: { id: selectedUnitId, buildingId },
       orderBy: { label: 'asc' },
       select: { id: true, label: true, buildingId: true },
     });
-    const unit = units[0];
+    const unit = units.find((candidate) => candidate.id === selectedUnitId);
     if (!unit) {
-      throw new ForbiddenException('User owns no units');
+      throw new ForbiddenException('The owned unit is not in the active building');
     }
     const building = await this.prisma.building.findUnique({
-      where: { id: unit.buildingId },
+      where: { id: buildingId },
       select: { name: true },
     });
     if (!building) {
       throw new NotFoundException('Building not found');
     }
     return this.buildStatement(
-      unit.buildingId,
+      buildingId,
       building.name,
       unit.id,
       unit.label,
@@ -244,15 +282,32 @@ export class ExportsService {
         select: { unitId: true, periodYearMonth: true, paidCents: true },
       }),
       this.prisma.ownership.findMany({
-        where: { unitId },
+        where: ownershipWindowWhere(
+          unitId,
+          buildingId,
+          new Date(Date.UTC(Number(year), 0, 1, 0, 0, 0, 0)),
+          endOfBillingYear(year),
+        ),
         include: { user: { select: { firstName: true, lastName: true } } },
       }),
     ]);
+    const from = new Date(Date.UTC(Number(year), 0, 1, 0, 0, 0, 0));
+    const to = endOfBillingYear(year);
+    const visibleOwners = ownerships.filter((ownership) =>
+      overlapsOwnershipPeriod(
+        ownership as typeof ownership & {
+          periodStart?: Date | null;
+          periodEnd?: Date | null;
+        },
+        from,
+        to,
+      ),
+    );
     return buildUnitStatement({
       buildingName,
       unitId,
       unitLabel,
-      ownerName: ownerDisplayName(ownerships.map((o) => o.user)),
+      ownerName: ownerDisplayName(visibleOwners.map((o) => o.user)),
       year,
       expenses,
       invoices,
@@ -265,12 +320,20 @@ export class ExportsService {
     user: AuthenticatedUser,
   ): Promise<void> {
     assertSameBuilding(user, buildingId);
-    if (user.role === 'ADMIN') return;
+    if (user.role === 'ADMIN' || user.role === 'BUILDING_OWNER') return;
+    const at = new Date();
     const ownership = await this.prisma.ownership.findFirst({
-      where: { userId: user.id, unitId },
+      where: effectiveOwnershipWhere(user.id, buildingId, at, unitId),
     });
-    if (!ownership) {
-      throw new ForbiddenException('You do not own this unit');
+    const owns = Boolean(
+      ownership &&
+        isEffectiveOwnership(ownership as typeof ownership & {
+          periodStart?: Date | null;
+          periodEnd?: Date | null;
+        }, at),
+    );
+    if (!owns) {
+      throw new ForbiddenException('You do not have an effective ownership of this unit');
     }
   }
 }

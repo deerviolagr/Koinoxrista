@@ -10,6 +10,7 @@ const record = (overrides: Partial<MyDataXmlRecord> = {}): MyDataXmlRecord => ({
   classificationType: 'E3_561_001',
   netAmountCents: 10_000,
   vatAmountCents: 2_400,
+  currency: 'EUR',
   ...overrides,
 });
 
@@ -51,6 +52,12 @@ describe('buildMyDataXml', () => {
 
     expect(xml).toContain('<series>A&amp;B&lt;1&gt;</series>');
     expect(xml).not.toContain('A&B');
+  });
+
+  it('rejects a non-GR currency instead of rendering a guessed amount', () => {
+    expect(() => buildMyDataXml([record({ currency: 'JPY' })])).toThrow(
+      /only.*EUR/,
+    );
   });
 
   it('is deterministic for the same input', () => {

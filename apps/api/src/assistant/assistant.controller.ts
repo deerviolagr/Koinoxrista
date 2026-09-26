@@ -12,6 +12,7 @@ import { Role } from '@prisma/client';
 import { IsString, MaxLength, MinLength } from 'class-validator';
 import { Throttle } from '@nestjs/throttler';
 import { classifyDefectText } from './defect-classifier';
+import { redactPii } from './privacy';
 
 import type { AuthenticatedUser } from '../auth/auth.types';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -72,7 +73,7 @@ export class AssistantController {
     return {
       ...result,
       buildingId,
-      redacted: dto.text.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]').slice(0, 2000),
+      redacted: redactPii(dto.text, 2_000),
     };
   }
 }

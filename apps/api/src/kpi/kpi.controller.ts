@@ -15,12 +15,9 @@ import { Role } from '@prisma/client';
 import {
   IsBoolean,
   IsIn,
-  IsInt,
   IsNumber,
   IsOptional,
   IsString,
-  Max,
-  Min,
 } from 'class-validator';
 
 import type { AuthenticatedUser } from '../auth/auth.types';
@@ -60,7 +57,11 @@ export class KpiController {
     @Query('weeks') weeks?: string,
   ) {
     const parsed = weeks ? Number(weeks) : 12;
-    return this.kpiService.list(buildingId, user, Number.isFinite(parsed) ? parsed : 12);
+    return this.kpiService.list(
+      buildingId,
+      user,
+      Number.isFinite(parsed) ? parsed : 12,
+    );
   }
 
   @Post('snapshot')
@@ -70,7 +71,7 @@ export class KpiController {
     @Param('buildingId') buildingId: string,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.kpiService.snapshot(buildingId);
+    return this.kpiService.snapshot(buildingId, user);
   }
 
   @Post('backfill')
@@ -80,7 +81,9 @@ export class KpiController {
     @Param('buildingId') buildingId: string,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.kpiService.backfill(buildingId).then((count) => ({ backfilled: count }));
+    return this.kpiService
+      .backfill(buildingId, user)
+      .then((count) => ({ backfilled: count }));
   }
 
   @Get('rules')

@@ -10,7 +10,8 @@ export function downloadBlob(blob: Blob, fileName: string): void {
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  URL.revokeObjectURL(url);
+  // Let the click task consume the object URL before releasing it.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 /** GETs an endpoint as a Blob (for CSV / file downloads). */

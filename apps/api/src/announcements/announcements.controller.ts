@@ -29,7 +29,7 @@ export class AnnouncementsController {
   constructor(private readonly announcementsService: AnnouncementsService) {}
 
   @Post('buildings/:buildingId/announcements')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   create(
     @Param('buildingId') buildingId: string,
     @Body() dto: CreateAnnouncementDto,
@@ -39,7 +39,7 @@ export class AnnouncementsController {
   }
 
   @Get('buildings/:buildingId/announcements')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   listAdmin(
     @Param('buildingId') buildingId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -48,7 +48,7 @@ export class AnnouncementsController {
   }
 
   @Get('buildings/:buildingId/feed')
-  @Roles(Role.ADMIN, Role.RESIDENT)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER, Role.RESIDENT)
   feed(
     @Param('buildingId') buildingId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -57,7 +57,7 @@ export class AnnouncementsController {
   }
 
   @Patch('announcements/:id')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   update(
     @Param('id') id: string,
     @Body() dto: UpdateAnnouncementDto,
@@ -67,13 +67,13 @@ export class AnnouncementsController {
   }
 
   @Delete('announcements/:id')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   remove(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
     return this.announcementsService.remove(id, user);
   }
 
   @Get('announcements/:id/comments')
-  @Roles(Role.ADMIN, Role.RESIDENT)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER, Role.RESIDENT)
   listComments(
     @Param('id') id: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -82,7 +82,7 @@ export class AnnouncementsController {
   }
 
   @Post('announcements/:id/comments')
-  @Roles(Role.ADMIN, Role.RESIDENT)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER, Role.RESIDENT)
   addComment(
     @Param('id') id: string,
     @Body() dto: CommentDto,
@@ -92,7 +92,7 @@ export class AnnouncementsController {
   }
 
   @Delete('announcements/:id/comments/:commentId')
-  @Roles(Role.ADMIN, Role.RESIDENT)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER, Role.RESIDENT)
   removeComment(
     @Param('id') id: string,
     @Param('commentId') commentId: string,

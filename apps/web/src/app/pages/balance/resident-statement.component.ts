@@ -9,15 +9,13 @@ import {
 import { DOCUMENT } from '@angular/common';
 import { EMPTY, catchError, of } from 'rxjs';
 import { AuthService } from '../../core/auth.service';
-import {
-  BrandingApiService,
-} from '../../core/api/branding-api.service';
+import { BrandingApiService } from '../../core/api/branding-api.service';
 import type { PublicBrandingDto } from '@org/shared';
 import {
   ResidentStatement,
   StatementsApiService,
 } from '../../core/api/statements-api.service';
-import { formatEuros } from '../../ui/format';
+import { MoneyPipe } from '../../ui/money.pipe';
 
 const MONTHS_EL = [
   'Ιανουάριος',
@@ -43,6 +41,7 @@ export function monthLabel(periodYearMonth: string): string {
 
 @Component({
   selector: 'app-resident-statement',
+  imports: [MoneyPipe],
   changeDetection: ChangeDetectionStrategy.OnPush,
   styles: `
     @media print {
@@ -58,7 +57,9 @@ export function monthLabel(periodYearMonth: string): string {
   `,
   template: `
     <div class="mx-auto max-w-3xl">
-      <div class="print:hidden mb-6 flex flex-wrap items-center justify-between gap-3">
+      <div
+        class="print:hidden mb-6 flex flex-wrap items-center justify-between gap-3"
+      >
         <h1 class="text-xl font-bold text-slate-900">Ετήσιο αποδεικτικό</h1>
         <div class="flex flex-wrap items-end gap-2">
           <label class="label !mb-0" for="statement-year">Έτος</label>
@@ -147,10 +148,10 @@ export function monthLabel(periodYearMonth: string): string {
                   </td>
                   <td>{{ row.description }}</td>
                   <td class="whitespace-nowrap text-right">
-                    {{ euros(row.invoicedCents) }}
+                    {{ row.invoicedCents | money }}
                   </td>
                   <td class="whitespace-nowrap text-right">
-                    {{ euros(row.paidCents) }}
+                    {{ row.paidCents | money }}
                   </td>
                 </tr>
               } @empty {
@@ -165,10 +166,10 @@ export function monthLabel(periodYearMonth: string): string {
               <tr class="font-semibold text-slate-900">
                 <td colspan="2">ΣΥΝΟΛΟ</td>
                 <td class="whitespace-nowrap text-right">
-                  {{ euros(s.totals.invoicedCents) }}
+                  {{ s.totals.invoicedCents | money }}
                 </td>
                 <td class="whitespace-nowrap text-right">
-                  {{ euros(s.totals.paidCents) }}
+                  {{ s.totals.paidCents | money }}
                 </td>
               </tr>
               <tr class="font-semibold text-slate-900">
@@ -179,7 +180,7 @@ export function monthLabel(periodYearMonth: string): string {
                   [class.text-red-700]="s.totals.balanceCents > 0"
                   [class.text-green-700]="s.totals.balanceCents === 0"
                 >
-                  {{ euros(s.totals.balanceCents) }}
+                  {{ s.totals.balanceCents | money }}
                 </td>
               </tr>
             </tfoot>
@@ -187,7 +188,10 @@ export function monthLabel(periodYearMonth: string): string {
 
           @if (branding(); as b) {
             @if (b.footerText) {
-              <p class="mt-6 text-center text-xs text-slate-500" [style.color]="b.accentColor">
+              <p
+                class="mt-6 text-center text-xs text-slate-500"
+                [style.color]="b.accentColor"
+              >
                 {{ b.footerText }}
               </p>
             }
@@ -206,8 +210,6 @@ export class ResidentStatementPage implements OnInit, OnDestroy {
   private readonly brandingApi = inject(BrandingApiService);
   private readonly auth = inject(AuthService);
   private readonly document = inject(DOCUMENT);
-
-  protected readonly euros = formatEuros;
 
   private readonly currentYear = new Date().getFullYear();
   protected readonly years = [

@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   ConflictException,
-  ForbiddenException,
   GoneException,
   Inject,
   Injectable,
@@ -11,6 +10,7 @@ import { Role } from '@prisma/client';
 import { createHash, randomBytes } from 'node:crypto';
 import * as bcrypt from 'bcryptjs';
 
+import { normalizeEmail } from '../auth/auth.types';
 import type { AuthenticatedUser } from '../auth/auth.types';
 import { AuditService } from '../audit/audit.service';
 import { assertSameBuilding } from '../common/tenant';
@@ -39,13 +39,21 @@ export class OpenRegistrationService {
   ) {}
 
   /** Regenerate the building's open-join code (audited, admin only). */
-  async regenerateJoinCode(buildingId: string, user: AuthenticatedUser): Promise<{ joinCode: string }> {
+  async regenerateJoinCode(
+    buildingId: string,
+    user: AuthenticatedUser,
+  ): Promise<{ joinCode: string }> {
     assertSameBuilding(user, buildingId);
-    const building = await this.prisma.building.findUnique({ where: { id: buildingId } });
+    const building = await this.prisma.building.findUnique({
+      where: { id: buildingId },
+    });
     if (!building) throw new NotFoundException('Building not found');
 
     const joinCode = makeJoinCode();
-    await this.prisma.building.update({ where: { id: buildingId }, data: { joinCode } });
+    await this.prisma.building.update({
+      where: { id: buildingId },
+      data: { joinCode },
+    });
     this.audit.record({
       buildingId,
       actorId: user.id,
@@ -69,15 +77,16 @@ export class OpenRegistrationService {
     lastName: string;
     buildingCode: string;
   }): Promise<{ id: string; email: string; status: string }> {
+    const buildingCode = dto.buildingCode.trim().toUpperCase();
     const building = await this.prisma.building.findFirst({
-      where: { joinCode: dto.buildingCode },
+      where: { joinCode: buildingCode },
       select: { id: true, joinCode: true },
     });
-    if (!building || building.joinCode !== dto.buildingCode) {
+    if (!building || building.joinCode !== buildingCode) {
       throw new BadRequestException('Invalid building code');
     }
 
-    const email = dto.email.toLowerCase();
+    const email = normalizeEmail(dto.email);
     const existing = await this.prisma.user.findUnique({ where: { email } });
     if (existing) {
       throw new ConflictException('Email already registered');
@@ -112,7 +121,10 @@ export class OpenRegistrationService {
           email: created.email,
           rawToken,
           buildingName: '',
-          appUrl: process.env.APP_URL ?? process.env.APP_BASE_URL ?? 'http://localhost:4200',
+          appUrl:
+            process.env.APP_URL ??
+            process.env.APP_BASE_URL ??
+            'http://localhost:4200',
         });
         return created;
       });
@@ -131,22 +143,61 @@ export class OpenRegistrationService {
    * under this plan uses email on the user record). Otherwise the resident
    * lands in PENDING_APPROVAL for the admin to approve.
    */
-  async verifyEmail(rawToken: string): Promise<{ id: string; email: string; status: string }> {
+  async verifyEmail(
+    rawToken: string,
+  ): Promise<{ id: string; email: string; status: string }> {
     const record = await this.prisma.emailVerification.findUnique({
       where: { tokenHash: hashEmailToken(rawToken) },
       include: { user: true },
     });
     if (!record) throw new GoneException('Verification link is invalid');
-    if (record.consumedAt) throw new GoneException('Verification link has already been used');
+    if (record.consumedAt)
+      throw new GoneException('Verification link has already been used');
     if (record.expiresAt.getTime() <= Date.now()) {
       throw new GoneException('Verification link has expired');
     }
     const buildingId = record.buildingId;
-    if (!buildingId) throw new BadRequestException('Verification record is missing a building');
+    if (!buildingId)
+      throw new BadRequestException(
+        'Verification record is missing a building',
+      );
+
+    if (!record.user)
+      throw new BadRequestException('Verification record is missing its user');
+    if (
+      record.user.status === 'DISABLED' ||
+      record.user.status === 'REJECTED' ||
+      record.user.status === 'ACTIVE'
+    ) {
+      throw new GoneException('This account cannot be activated');
+    }
 
     const now = new Date();
-    if (!record.user) throw new BadRequestException('Verification record is missing its user');
-    const email = record.user.email;
+    const verificationDelegate = this.prisma.emailVerification as unknown as {
+      updateMany?: (args: unknown) => Promise<{ count: number }>;
+      update: (args: unknown) => Promise<unknown>;
+    };
+    if (typeof verificationDelegate.updateMany === 'function') {
+      const claimed = await verificationDelegate.updateMany({
+        where: {
+          id: record.id,
+          consumedAt: null,
+          expiresAt: { gt: now },
+        },
+        data: { consumedAt: now },
+      });
+      if (claimed.count !== 1) {
+        throw new GoneException('Verification link has already been used');
+      }
+    } else {
+      // Compatibility for pre-verification generated clients; the current
+      // Prisma path above is the atomic one.
+      await verificationDelegate.update({
+        where: { id: record.id },
+        data: { consumedAt: now },
+      });
+    }
+    const email = normalizeEmail(record.user.email);
     // Owner-of-record match: if an ownership exists with a matching email (the
     // user row email), auto-activate; otherwise require admin approval.
     const ownership = await this.prisma.ownership.findFirst({
@@ -158,11 +209,6 @@ export class OpenRegistrationService {
       where: { id: record.userId },
       data: { status },
     });
-    await this.prisma.emailVerification.update({
-      where: { id: record.id },
-      data: { consumedAt: now },
-    });
-
     await this.prisma.membership.upsert({
       where: { userId_buildingId: { userId: record.userId, buildingId } },
       create: {
@@ -204,7 +250,9 @@ export class OpenRegistrationService {
 
     if (unitId) {
       // Rotate existing owner off the unit (move ownership) unless empty.
-      const unit = await this.prisma.unit.findFirst({ where: { id: unitId, buildingId } });
+      const unit = await this.prisma.unit.findFirst({
+        where: { id: unitId, buildingId },
+      });
       if (!unit) throw new NotFoundException('Unit not found');
       await this.prisma.ownership.create({
         data: {
@@ -234,14 +282,21 @@ export class OpenRegistrationService {
   }
 
   /** Reject a PENDING_APPROVAL resident (audited, admin only). */
-  async reject(buildingId: string, userId: string, user: AuthenticatedUser): Promise<void> {
+  async reject(
+    buildingId: string,
+    userId: string,
+    user: AuthenticatedUser,
+  ): Promise<void> {
     assertSameBuilding(user, buildingId);
     const target = await this.prisma.user.findFirst({
       where: { id: userId, buildingId, status: 'PENDING_APPROVAL' },
     });
     if (!target) throw new NotFoundException('Pending resident not found');
 
-    await this.prisma.user.update({ where: { id: userId }, data: { status: 'REJECTED' } });
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { status: 'REJECTED' },
+    });
     this.audit.record({
       buildingId,
       actorId: user.id,

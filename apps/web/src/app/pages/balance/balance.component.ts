@@ -12,6 +12,8 @@ import { Invoice, PaymentOrder } from '@org/shared';
 import {
   InvoiceDetailView,
   PaymentsApiService,
+  checkoutActionLabel,
+  checkoutProviderLabel,
 } from '../../core/api/payments-api.service';
 import { InvoicesApiService } from '../../core/api/invoices-api.service';
 import { GdprApiService } from '../../core/api/gdpr-api.service';
@@ -20,16 +22,11 @@ import { AuthService } from '../../core/auth.service';
 import { AnalyticsService } from '../../core/analytics.service';
 import { StatusBadgeComponent } from '../../ui/status-badge.component';
 import { ConfirmModalComponent } from '../../ui/confirm-modal.component';
-import {
-  QrCodeComponent,
-  buildIrisNote,
-} from '../../ui/qr-code.component';
-import {
-  HelpTourComponent,
-  HelpTourStep,
-} from '../../ui/help-tour.component';
+import { QrCodeComponent } from '../../ui/qr-code.component';
+import { HelpTourComponent, HelpTourStep } from '../../ui/help-tour.component';
 import { ToastService } from '../../ui/toast.service';
-import { formatEuros, shortRef } from '../../ui/format';
+import { shortRef } from '../../ui/format';
+import { MoneyPipe } from '../../ui/money.pipe';
 import { TourService } from '../../core/tour.service';
 
 /** Detects the sandbox/mock checkout flow (pure). */
@@ -39,7 +36,14 @@ export function isMockCheckout(checkoutUrl: string): boolean {
 
 @Component({
   selector: 'app-balance',
-  imports: [StatusBadgeComponent, ConfirmModalComponent, QrCodeComponent, RouterLink, HelpTourComponent],
+  imports: [
+    StatusBadgeComponent,
+    ConfirmModalComponent,
+    QrCodeComponent,
+    RouterLink,
+    HelpTourComponent,
+    MoneyPipe,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
@@ -63,7 +67,7 @@ export function isMockCheckout(checkoutUrl: string): boolean {
           [class.text-red-600]="outstanding() > 0"
           [class.text-green-700]="outstanding() === 0"
         >
-          {{ euros(outstanding()) }}
+          {{ outstanding() | money }}
         </p>
       </div>
 
@@ -82,8 +86,8 @@ export function isMockCheckout(checkoutUrl: string): boolean {
             @for (invoice of invoices(); track invoice.id) {
               <tr>
                 <td class="font-medium">{{ invoice.periodYearMonth }}</td>
-                <td>{{ euros(invoice.totalCents) }}</td>
-                <td>{{ euros(invoice.paidCents) }}</td>
+                <td>{{ invoice.totalCents | money }}</td>
+                <td>{{ invoice.paidCents | money }}</td>
                 <td><app-status-badge [status]="invoice.status" /></td>
                 <td class="whitespace-nowrap text-right">
                   <button
@@ -122,16 +126,13 @@ export function isMockCheckout(checkoutUrl: string): boolean {
             <summary
               class="cursor-pointer select-none text-sm font-semibold text-slate-900"
             >
-              Ή πληρώστε με IRIS
+              Διαθέσιμες επιλογές: {{ providerLabel(activeProvider()) }}
             </summary>
             <div
               class="mt-4 flex flex-col items-start gap-4 sm:flex-row sm:items-center"
             >
               <app-qr-code [value]="url" [size]="160" />
               <div class="min-w-0 flex-1">
-                <p class="mb-1 text-xs text-slate-500">
-                  Σημείωμα πληρωμής: {{ irisNote() }}
-                </p>
                 <a
                   [href]="url"
                   target="_blank"
@@ -148,7 +149,7 @@ export function isMockCheckout(checkoutUrl: string): boolean {
                     rel="noopener"
                     class="btn btn-primary"
                   >
-                    Πληρωμή με κάρτα
+                    {{ checkoutAction(activeProvider()) }}
                   </a>
                   <button
                     type="button"
@@ -199,21 +200,21 @@ export function isMockCheckout(checkoutUrl: string): boolean {
 
           <dl class="mb-4 grid grid-cols-2 gap-2 text-sm">
             <dt class="text-slate-500">Σύνολο</dt>
-            <dd>{{ euros(d.totalCents) }}</dd>
+            <dd>{{ d.totalCents | money }}</dd>
             <dt class="text-slate-500">Πληρώθηκε</dt>
-            <dd>{{ euros(d.paidCents) }}</dd>
+            <dd>{{ d.paidCents | money }}</dd>
             <dt class="text-slate-500">Κατάσταση</dt>
             <dd><app-status-badge [status]="d.status" /></dd>
           </dl>
 
-          <a
-            [href]="receiptUrl(d.id)"
-            target="_blank"
-            rel="noopener"
+          <button
+            type="button"
             class="btn btn-secondary mb-4 w-full"
+            [disabled]="downloadingReceiptId() === d.id"
+            (click)="downloadReceipt(d)"
           >
-            Απόδειξη
-          </a>
+            {{ downloadingReceiptId() === d.id ? 'Λήψη…' : 'Λήψη απόδειξης' }}
+          </button>
 
           <h3 class="card-title">Πληρωμές</h3>
           @if (d.payments.length > 0) {
@@ -223,20 +224,27 @@ export function isMockCheckout(checkoutUrl: string): boolean {
                   class="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm"
                 >
                   <div>
-                    <span class="badge mr-2" [class]="methodCls(payment.method)">
+                    <span
+                      class="badge mr-2"
+                      [class]="methodCls(payment.method)"
+                    >
                       {{ methodLabel(payment.method) }}
                     </span>
-                    <span class="text-xs text-slate-500">{{ short(payment.pspRef) }}</span>
+                    <span class="text-xs text-slate-500">{{
+                      short(payment.pspRef)
+                    }}</span>
                   </div>
                   <div class="text-right">
-                    <p class="font-medium">{{ euros(payment.amountCents) }}</p>
+                    <p class="font-medium">{{ payment.amountCents | money }}</p>
                     <p class="text-xs text-slate-500">{{ payment.status }}</p>
                   </div>
                 </li>
               }
             </ul>
           } @else {
-            <p class="text-sm text-slate-500">Δεν υπάρχουν καταγεγραμμένες πληρωμές.</p>
+            <p class="text-sm text-slate-500">
+              Δεν υπάρχουν καταγεγραμμένες πληρωμές.
+            </p>
           }
         </aside>
       </div>
@@ -310,8 +318,9 @@ export class BalancePage implements OnInit {
   private readonly router = inject(Router);
   private readonly toast = inject(ToastService);
 
-  protected readonly euros = formatEuros;
   protected readonly short = shortRef;
+  protected readonly providerLabel = checkoutProviderLabel;
+  protected readonly checkoutAction = checkoutActionLabel;
   protected readonly methodLabel = this.paymentsApi.methodLabel;
 
   /** Ξενάγηση πρώτης χρήσης (παίζεται μία φορά ανά συσκευή). */
@@ -324,7 +333,7 @@ export class BalancePage implements OnInit {
     },
     {
       title: 'Πληρωμή online',
-      body: 'Πατήστε «Πληρωμή» για κάρτα ή IRIS. Η απόδειξη κατεβαίνει από το ιστορικό.',
+      body: 'Πατήστε «Πληρωμή» για τις διαθέσιμες επιλογές. Η απόδειξη κατεβαίνει από το ιστορικό.',
       selector: 'table.data-table',
     },
   ];
@@ -338,8 +347,10 @@ export class BalancePage implements OnInit {
   protected readonly deleting = signal(false);
   protected readonly confirmingDelete = signal(false);
   protected readonly confirmText = signal('');
-  /** Checkout order awaiting payment (drives the IRIS section). */
+  /** Checkout order awaiting payment and the PSP selected by the building. */
   protected readonly activeOrder = signal<PaymentOrder | null>(null);
+  protected readonly activeProvider = signal<string | null>(null);
+  protected readonly downloadingReceiptId = signal<string | null>(null);
 
   /** Active checkout URL, hidden once the invoice is no longer payable. */
   protected readonly activeCheckoutUrl = computed(() => {
@@ -348,10 +359,6 @@ export class BalancePage implements OnInit {
     const invoice = this.invoices().find((i) => i.id === order.invoiceId);
     return invoice && this.isPayable(invoice) ? order.checkoutUrl : null;
   });
-
-  protected readonly irisNote = computed(() =>
-    buildIrisNote(this.activeOrder()?.orderCode ?? ''),
-  );
 
   /** Sum of unpaid remainders (total − paid) for open invoices. */
   protected readonly outstanding = () =>
@@ -378,6 +385,8 @@ export class BalancePage implements OnInit {
   protected loadInvoices(): void {
     this.loading.set(true);
     this.error.set(false);
+    this.activeOrder.set(null);
+    this.activeProvider.set(null);
     this.invoicesApi
       .mine()
       .pipe(
@@ -408,12 +417,31 @@ export class BalancePage implements OnInit {
     this.detail.set(null);
   }
 
-  protected receiptUrl(invoiceId: string): string {
-    return this.paymentsApi.receiptUrl(invoiceId);
+  protected downloadReceipt(invoice: InvoiceDetailView): void {
+    if (this.downloadingReceiptId()) return;
+    this.downloadingReceiptId.set(invoice.id);
+    this.paymentsApi
+      .receipt(invoice.id)
+      .pipe(
+        catchError(() => {
+          this.toast.error('Η λήψη της απόδειξης απέτυχε.');
+          this.downloadingReceiptId.set(null);
+          return EMPTY;
+        }),
+      )
+      .subscribe((blob) => {
+        downloadBlob(
+          blob,
+          `receipt-${invoice.periodYearMonth}-${invoice.id}.html`,
+        );
+        this.downloadingReceiptId.set(null);
+      });
   }
 
   protected methodCls(method: string | null | undefined): string {
-    return method === 'IRIS' ? 'bg-blue-100 text-blue-800' : 'bg-slate-200 text-slate-700';
+    return method === 'IRIS'
+      ? 'bg-blue-100 text-blue-800'
+      : 'bg-slate-200 text-slate-700';
   }
 
   protected pay(invoice: Invoice): void {
@@ -429,9 +457,10 @@ export class BalancePage implements OnInit {
           return EMPTY;
         }),
       )
-      .subscribe(({ order }) => {
+      .subscribe(({ order, provider }) => {
         this.payingId.set(null);
         this.activeOrder.set(order);
+        this.activeProvider.set(provider ?? null);
         if (isMockCheckout(order.checkoutUrl)) {
           this.toast.info('Δοκιμαστική πληρωμή (sandbox).', {
             link: { url: order.checkoutUrl, label: 'Άνοιγμα σε νέα καρτέλα' },
@@ -496,8 +525,9 @@ export class BalancePage implements OnInit {
       )
       .subscribe(() => {
         this.toast.info('Ο λογαριασμός σας ανωνυμοποιήθηκε.');
-        this.auth.logout();
-        void this.router.navigateByUrl('/login');
+        this.auth.logout().subscribe(() => {
+          void this.router.navigateByUrl('/login');
+        });
       });
   }
 }

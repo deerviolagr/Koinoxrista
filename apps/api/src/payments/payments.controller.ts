@@ -2,8 +2,10 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Post,
+  Req,
   UseGuards,
   UsePipes,
   ValidationPipe,
@@ -19,6 +21,11 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { routes } from '../security/throttle.config';
 import { WebhookDto } from './dto/webhook.dto';
 import { PaymentsService } from './payments.service';
+
+interface RawBodyRequest {
+  rawBody?: Buffer | string;
+  headers?: Record<string, string | string[] | undefined>;
+}
 
 @Controller()
 @UsePipes(new ValidationPipe({ whitelist: true }))
@@ -63,7 +70,11 @@ export class PaymentsWebhookController {
   }
 }
 
-/** Stripe callback route — public; settles an invoice from a completed session. */
+/**
+ * Stripe callback route. The raw request bytes are mandatory: parsing JSON
+ * first and then attempting to verify it would allow a body/signature
+ * mismatch. The application bootstrap enables Express rawBody capture.
+ */
 @Controller('payments/webhook/stripe')
 @UsePipes(new ValidationPipe({ whitelist: true }))
 export class StripeWebhookController {
@@ -71,20 +82,41 @@ export class StripeWebhookController {
 
   @Post()
   @Throttle({ default: { limit: routes.webhook.limit, ttl: routes.webhook.ttlMs } })
-  webhook(@Body() body: Record<string, unknown>) {
-    return this.paymentsService.handleStripeWebhook({
-      object:
-        typeof body.object === 'string' ? body.object : undefined,
-      paymentIntent:
-        body.payment_intent && typeof body.payment_intent === 'object'
-          ? { id: (body.payment_intent as { id?: unknown }).id as string | undefined }
-          : null,
-      invoiceRef:
-        typeof (body as { metadata?: Record<string, unknown> }).metadata?.invoiceRef === 'string'
-          ? ((body as { metadata?: Record<string, unknown> }).metadata
-              ?.invoiceRef as string)
-          : undefined,
-    });
+  webhook(
+    @Req() req: RawBodyRequest,
+    @Headers('stripe-signature') signature?: string | string[],
+  ) {
+    const requestSignature = req?.headers?.['stripe-signature'];
+    const signatureHeader = Array.isArray(signature)
+      ? signature[0]
+      : signature ?? (Array.isArray(requestSignature) ? requestSignature[0] : requestSignature);
+    return this.paymentsService.handleStripeWebhook(
+      req?.rawBody ?? '',
+      signatureHeader ?? '',
+    );
+  }
+}
+
+/** Stripe JP uses the same signed event contract and can share the adapter. */
+@Controller('payments/webhook/stripejp')
+@UsePipes(new ValidationPipe({ whitelist: true }))
+export class StripeJpWebhookController {
+  constructor(private readonly paymentsService: PaymentsService) {}
+
+  @Post()
+  @Throttle({ default: { limit: routes.webhook.limit, ttl: routes.webhook.ttlMs } })
+  webhook(
+    @Req() req: RawBodyRequest,
+    @Headers('stripe-signature') signature?: string | string[],
+  ) {
+    const requestSignature = req?.headers?.['stripe-signature'];
+    const signatureHeader = Array.isArray(signature)
+      ? signature[0]
+      : signature ?? (Array.isArray(requestSignature) ? requestSignature[0] : requestSignature);
+    return this.paymentsService.handleStripeWebhook(
+      req?.rawBody ?? '',
+      signatureHeader ?? '',
+    );
   }
 }
 
@@ -103,6 +135,7 @@ export class MercadoPagoWebhookController {
         body.data && typeof body.data === 'object'
           ? { id: (body.data as { id?: unknown }).id as string | undefined }
           : null,
+      eventId: typeof body.id === 'string' ? body.id : undefined,
     });
   }
 }

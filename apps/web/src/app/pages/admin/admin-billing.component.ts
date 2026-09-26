@@ -14,11 +14,14 @@ import type {
   PlatformInvoiceStatus,
 } from '@org/shared/lib/self-billing';
 import type { SubscriptionDto } from '@org/shared';
-import { TIER_PRICES_CENTS } from '@org/shared';
+import {
+  periodTotalCentsForCurrency,
+  tierPriceCentsForCurrency,
+} from '@org/shared';
 import { SelfBillingApiService } from '../../core/api/self-billing-api.service';
 import { SubscriptionsApiService } from '../../core/api/subscriptions-api.service';
 import { ToastService } from '../../ui/toast.service';
-import { formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 
 const STATUS_LABELS: Record<PlatformInvoiceStatus, string> = {
   ISSUED: 'Εκδοθέν',
@@ -80,7 +83,7 @@ export function periodLabel(period: string): string {
               <dt class="text-slate-500">Πακέτο</dt>
               <dd class="font-medium text-slate-900">
                 {{ tierLabel(s.tier) }}
-                ({{ euros(TIER_PRICES_CENTS[s.tier]) }}/διαμ./μήνα)
+                ({{ euros(tierPrice(s.tier)) }}/διαμ./μήνα)
               </dd>
             </div>
             <div>
@@ -196,13 +199,14 @@ export function periodLabel(period: string): string {
 })
 export class AdminBillingPage implements OnInit, OnDestroy {
   private readonly billingApi = inject(SelfBillingApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly subscriptionsApi = inject(SubscriptionsApiService);
   private readonly toast = inject(ToastService);
   private readonly document = inject(DOCUMENT);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
   protected readonly periodLabel = periodLabel;
-  protected readonly TIER_PRICES_CENTS = TIER_PRICES_CENTS;
 
   protected readonly now = new Date();
   protected readonly period = signal(
@@ -221,7 +225,12 @@ export class AdminBillingPage implements OnInit, OnDestroy {
   protected readonly nextChargeCents = computed(() => {
     const s = this.sub();
     if (!s) return 0;
-    return TIER_PRICES_CENTS[s.tier] * s.units;
+    return periodTotalCentsForCurrency(
+      s.tier,
+      s.billingCycle,
+      s.units,
+      this.money.currency(),
+    );
   });
 
   ngOnInit(): void {
@@ -297,6 +306,10 @@ export class AdminBillingPage implements OnInit, OnDestroy {
 
   protected print(): void {
     window.print();
+  }
+
+  protected tierPrice(tier: SubscriptionDto['tier']): number {
+    return tierPriceCentsForCurrency(tier, this.money.currency());
   }
 
   protected tierLabel(tier: string): string {

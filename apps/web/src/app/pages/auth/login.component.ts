@@ -1,8 +1,14 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  inject,
+  signal,
+} from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
-import { Router, RouterLink } from '@angular/router';
-import { AuthService } from '../../core/auth.service';
-import { homeForRole } from '../../core/role.guard';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
+import { AuthAccountStatusError, AuthService } from '../../core/auth.service';
+import { homeForRole, safeReturnUrl } from '../../core/role.guard';
+import { LocaleSelectorComponent } from '../../core/locale-selector.component';
 import { TranslatePipe } from '../../core/translate.pipe';
 
 /** One-click demo accounts, one per role (seeded by apps/api/prisma/seed.ts). */
@@ -23,20 +29,56 @@ const DEMO_ACCOUNTS = [
     password: 'Platform1234!',
     roleKey: 'role.platformAdmin',
   },
-  { email: 'maria@demo.gr', password: 'Password123!', roleKey: 'role.resident' },
-  { email: 'provider@demo.gr', password: 'Password123!', roleKey: 'role.provider' },
+  {
+    email: 'maria@demo.gr',
+    password: 'Password123!',
+    roleKey: 'role.resident',
+  },
+  {
+    email: 'provider@demo.gr',
+    password: 'Password123!',
+    roleKey: 'role.provider',
+  },
 ] as const;
 
 type DemoAccount = (typeof DEMO_ACCOUNTS)[number];
 
 @Component({
   selector: 'app-login',
-  imports: [ReactiveFormsModule, RouterLink, TranslatePipe],
+  imports: [
+    ReactiveFormsModule,
+    RouterLink,
+    TranslatePipe,
+    LocaleSelectorComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="mx-auto mt-10 w-full max-w-md px-4">
       <div class="card">
-        <h1 class="mb-1 text-2xl font-bold text-slate-900">{{ 'login.title' | translate }}</h1>
+        <div class="mb-4 flex items-start justify-between gap-3">
+          <h1 class="text-2xl font-bold text-slate-900">
+            {{ 'login.title' | translate }}
+          </h1>
+          <app-locale-selector />
+        </div>
+
+        @if (accountStatus()) {
+          <div
+            class="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"
+            role="status"
+          >
+            <p>{{ accountStatusMessage() }}</p>
+            @if (accountStatus() === 'PENDING_VERIFICATION' && accountEmail()) {
+              <a
+                routerLink="/verify-email"
+                [queryParams]="{ email: accountEmail(), pending: 1 }"
+                class="mt-2 inline-block font-semibold underline"
+              >
+                Επιβεβαίωση ή επαναποστολή email
+              </a>
+            }
+          </div>
+        }
 
         @if (ticket()) {
           <!-- ΒΗΜΑ 2: κωδικός επαλήθευσης (2FA) -->
@@ -58,7 +100,9 @@ type DemoAccount = (typeof DEMO_ACCOUNTS)[number];
             class="flex flex-col gap-4"
           >
             <div>
-              <label class="label" for="code">{{ 'login.verificationCode' | translate }}</label>
+              <label class="label" for="code">{{
+                'login.verificationCode' | translate
+              }}</label>
               <input
                 id="code"
                 type="text"
@@ -69,8 +113,16 @@ type DemoAccount = (typeof DEMO_ACCOUNTS)[number];
                 placeholder="123456"
               />
             </div>
-            <button type="submit" class="btn btn-primary" [disabled]="loading()">
-              {{ loading() ? ('login.verifying' | translate) : ('login.verify' | translate) }}
+            <button
+              type="submit"
+              class="btn btn-primary"
+              [disabled]="loading()"
+            >
+              {{
+                loading()
+                  ? ('login.verifying' | translate)
+                  : ('login.verify' | translate)
+              }}
             </button>
             <button
               type="button"
@@ -109,11 +161,15 @@ type DemoAccount = (typeof DEMO_ACCOUNTS)[number];
                 formControlName="email"
               />
               @if (submitted() && form.controls.email.invalid) {
-                <p class="field-error">{{ 'login.invalidEmail' | translate }}</p>
+                <p class="field-error">
+                  {{ 'login.invalidEmail' | translate }}
+                </p>
               }
             </div>
             <div>
-              <label class="label" for="password">{{ 'login.password' | translate }}</label>
+              <label class="label" for="password">{{
+                'login.password' | translate
+              }}</label>
               <input
                 id="password"
                 type="password"
@@ -121,7 +177,9 @@ type DemoAccount = (typeof DEMO_ACCOUNTS)[number];
                 formControlName="password"
               />
               @if (submitted() && form.controls.password.invalid) {
-                <p class="field-error">{{ 'login.passwordRequired' | translate }}</p>
+                <p class="field-error">
+                  {{ 'login.passwordRequired' | translate }}
+                </p>
               }
             </div>
             <button
@@ -129,7 +187,11 @@ type DemoAccount = (typeof DEMO_ACCOUNTS)[number];
               class="btn btn-primary"
               [disabled]="loading()"
             >
-              {{ loading() ? ('login.connecting' | translate) : ('login.submit' | translate) }}
+              {{
+                loading()
+                  ? ('login.connecting' | translate)
+                  : ('login.submit' | translate)
+              }}
             </button>
           </form>
 
@@ -159,8 +221,12 @@ type DemoAccount = (typeof DEMO_ACCOUNTS)[number];
                 [disabled]="loading()"
                 (click)="loginAs(account)"
               >
-                <span class="font-medium">{{ account.roleKey | translate }}</span>
-                <span class="font-mono text-xs text-slate-500">{{ account.email }}</span>
+                <span class="font-medium">{{
+                  account.roleKey | translate
+                }}</span>
+                <span class="font-mono text-xs text-slate-500">{{
+                  account.email
+                }}</span>
               </button>
             }
           </div>
@@ -173,10 +239,13 @@ export class LoginPage {
   private readonly fb = inject(FormBuilder);
   private readonly auth = inject(AuthService);
   private readonly router = inject(Router);
+  private readonly route = inject(ActivatedRoute);
 
   protected readonly submitted = signal(false);
   protected readonly loading = signal(false);
   protected readonly errorKey = signal<string | null>(null);
+  protected readonly accountStatus = signal<string | null>(null);
+  protected readonly accountEmail = signal('');
   /** Set when POST /auth/login answers {twoFactorRequired, ticket}. */
   protected readonly ticket = signal<string | null>(null);
 
@@ -194,6 +263,7 @@ export class LoginPage {
   protected submit(): void {
     this.submitted.set(true);
     this.errorKey.set(null);
+    this.accountStatus.set(null);
     if (this.form.invalid || this.loading()) return;
     this.loading.set(true);
     const { email, password } = this.form.getRawValue();
@@ -204,12 +274,9 @@ export class LoginPage {
           this.loading.set(false);
           return;
         }
-        void this.router.navigateByUrl(homeForRole(this.auth.role));
+        this.completeLogin();
       },
-      error: () => {
-        this.errorKey.set('login.errorBadCredentials');
-        this.loading.set(false);
-      },
+      error: (error: unknown) => this.handleLoginError(error),
     });
   }
 
@@ -217,6 +284,7 @@ export class LoginPage {
   protected loginAs(account: DemoAccount): void {
     if (this.loading()) return;
     this.errorKey.set(null);
+    this.accountStatus.set(null);
     this.submitted.set(true);
     this.form.setValue({ email: account.email, password: account.password });
     this.loading.set(true);
@@ -227,12 +295,9 @@ export class LoginPage {
           this.loading.set(false);
           return;
         }
-        void this.router.navigateByUrl(homeForRole(this.auth.role));
+        this.completeLogin();
       },
-      error: () => {
-        this.errorKey.set('login.errorBadCredentials');
-        this.loading.set(false);
-      },
+      error: (error: unknown) => this.handleLoginError(error),
     });
   }
 
@@ -243,18 +308,58 @@ export class LoginPage {
     this.loading.set(true);
     const { code } = this.codeForm.getRawValue();
     this.auth.loginWith2fa(ticket, code.trim()).subscribe({
-      next: () => void this.router.navigateByUrl(homeForRole(this.auth.role)),
-      error: () => {
+      next: () => this.completeLogin(),
+      error: (error: unknown) => {
+        if (error instanceof AuthAccountStatusError) {
+          this.handleLoginError(error);
+          return;
+        }
         this.errorKey.set('login.errorBadCode');
         this.loading.set(false);
       },
     });
   }
 
+  private completeLogin(): void {
+    const fallback = homeForRole(this.auth.role);
+    const returnUrl = safeReturnUrl(
+      this.route.snapshot.queryParamMap.get('returnUrl'),
+      fallback,
+    );
+    void this.router.navigateByUrl(returnUrl);
+  }
+
+  private handleLoginError(error: unknown): void {
+    if (error instanceof AuthAccountStatusError) {
+      this.accountStatus.set(error.accountStatus);
+      this.accountEmail.set(error.email);
+      this.loading.set(false);
+      return;
+    }
+    this.errorKey.set('login.errorBadCredentials');
+    this.loading.set(false);
+  }
+
+  protected accountStatusMessage(): string {
+    switch (this.accountStatus()) {
+      case 'PENDING_VERIFICATION':
+        return 'Ο λογαριασμός περιμένει επιβεβαίωση του email.';
+      case 'PENDING_APPROVAL':
+        return 'Ο λογαριασμός είναι ενεργός, αλλά περιμένει έγκριση του διαχειριστή.';
+      case 'REJECTED':
+        return 'Η αίτηση του λογαριασμού απορρίφθηκε. Επικοινωνήστε με τον διαχειριστή.';
+      case 'SUSPENDED':
+        return 'Ο λογαριασμός σας έχει αναστολή. Επικοινωνήστε με τον διαχειριστή.';
+      default:
+        return 'Ο λογαριασμός δεν είναι ακόμη ενεργός.';
+    }
+  }
+
   protected cancelTwoFactor(): void {
     this.ticket.set(null);
     this.codeForm.reset({ code: '' });
     this.errorKey.set(null);
+    this.accountStatus.set(null);
     this.loading.set(false);
   }
 }

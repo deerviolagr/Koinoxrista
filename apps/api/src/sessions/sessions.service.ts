@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Injectable,
-  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -34,85 +33,137 @@ export function hashRefreshToken(rawToken: string): string {
 
 @Injectable()
 export class SessionsService {
-  private readonly logger = new Logger(SessionsService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
   ) {}
 
   /**
-   * Tracks a freshly issued refresh token. Fire-and-forget: auth must never
-   * fail because session bookkeeping did. Idempotent per token hash so
-   * duplicate issue paths cannot inflate the list.
+   * Tracks a freshly issued refresh token. The write is awaited: a login is
+   * not considered established until its session can be persisted, otherwise
+   * a later refresh would have to fail open.
    */
-  record(userId: string, rawToken: string, meta?: SessionMeta): void {
+  async record(
+    userId: string,
+    rawToken: string,
+    meta?: SessionMeta,
+  ): Promise<void> {
     const tokenHash = hashRefreshToken(rawToken);
-    this.prisma.refreshSession
-      .findFirst({ where: { tokenHash }, select: { id: true } })
-      .then((existing) => {
-        if (existing) return null;
-        return this.prisma.refreshSession.create({
-          data: {
-            userId,
-            tokenHash,
-            userAgent: meta?.userAgent ?? null,
-            ip: meta?.ip ?? null,
-          },
-        });
-      })
-      .catch((error: unknown) =>
-        this.logger.warn(`session record failed: ${String(error)}`),
-      );
+    const existing = await this.prisma.refreshSession.findFirst({
+      where: { tokenHash },
+      select: { id: true },
+    });
+    if (existing) return;
+    try {
+      await this.prisma.refreshSession.create({
+        data: {
+          userId,
+          tokenHash,
+          userAgent: meta?.userAgent ?? null,
+          ip: meta?.ip ?? null,
+        },
+      });
+    } catch (error) {
+      // A concurrent login may have recorded the same deterministic JWT. The
+      // unique token hash makes that outcome idempotent; all other failures
+      // must propagate so the caller fails closed.
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        (error as { code?: unknown }).code === 'P2002'
+      ) {
+        return;
+      }
+      throw error;
+    }
   }
 
   /**
-   * Re-points the session row of a rotated refresh token onto its replacement
-   * so one logical login stays one row. Falls back to tracking the new token
-   * when the previous one predates this feature.
+   * Atomically re-points a live session from the presented refresh token to
+   * its replacement. There is deliberately no "create if missing" fallback:
+   * accepting an untracked token would make revocation and replay protection
+   * fail open.
    */
-  rotate(
+  async rotate(
     userId: string,
     previousRawToken: string,
     nextRawToken: string,
-  ): void {
+  ): Promise<void> {
     const previousHash = hashRefreshToken(previousRawToken);
     const nextHash = hashRefreshToken(nextRawToken);
-    if (previousHash === nextHash) return;
-    this.prisma.refreshSession
-      .deleteMany({ where: { tokenHash: nextHash } })
-      .then(() =>
-        this.prisma.refreshSession.updateMany({
-          where: { tokenHash: previousHash, userId },
-          data: { tokenHash: nextHash, lastUsedAt: new Date() },
-        }),
-      )
-      .then((res) => {
-        if (res.count === 0) {
-          // No tracked predecessor — start tracking from this rotation.
-          return this.prisma.refreshSession.create({
-            data: { userId, tokenHash: nextHash },
-          });
-        }
-        return null;
-      })
-      .catch((error: unknown) =>
-        this.logger.warn(`session rotate failed: ${String(error)}`),
-      );
+    if (previousHash === nextHash) {
+      const touched = await this.prisma.refreshSession.updateMany({
+        where: { userId, tokenHash: previousHash, revokedAt: null },
+        data: { lastUsedAt: new Date() },
+      });
+      if (touched.count !== 1) {
+        throw new UnauthorizedException('Session is no longer active');
+      }
+      return;
+    }
+
+    const result = await this.prisma.refreshSession.updateMany({
+      where: {
+        userId,
+        tokenHash: previousHash,
+        revokedAt: null,
+      },
+      data: {
+        tokenHash: nextHash,
+        lastUsedAt: new Date(),
+      },
+    });
+    if (result.count !== 1) {
+      throw new UnauthorizedException('Session is no longer active');
+    }
   }
 
   /**
-   * Fails the refresh flow for tokens whose session was revoked by the user.
-   * Untracked tokens (pre-feature or legacy) stay valid — fail-open.
+   * Fails closed for both revoked and untracked refresh tokens. The optional
+   * user id binds the lookup to the subject in the verified JWT as an extra
+   * defence against a token/session mismatch.
    */
-  async assertNotRevoked(rawToken: string): Promise<void> {
+  async assertNotRevoked(
+    rawToken: string,
+    expectedUserId?: string,
+  ): Promise<void> {
     const session = await this.prisma.refreshSession.findFirst({
-      where: { tokenHash: hashRefreshToken(rawToken) },
-      select: { revokedAt: true },
+      where: {
+        tokenHash: hashRefreshToken(rawToken),
+        ...(expectedUserId ? { userId: expectedUserId } : {}),
+      },
+      select: { revokedAt: true, userId: true },
     });
-    if (session?.revokedAt) {
+    if (!session) {
+      throw new UnauthorizedException('Invalid session');
+    }
+    if (session.revokedAt) {
       throw new UnauthorizedException('Session revoked');
     }
+    if (expectedUserId && session.userId !== expectedUserId) {
+      throw new UnauthorizedException('Invalid session');
+    }
+  }
+
+  /** Revokes only the session represented by the current refresh cookie. */
+  async revokeCurrent(userId: string, rawToken: string): Promise<boolean> {
+    const result = await this.prisma.refreshSession.updateMany({
+      where: {
+        userId,
+        tokenHash: hashRefreshToken(rawToken),
+        revokedAt: null,
+      },
+      data: { revokedAt: new Date() },
+    });
+    if (result.count === 1) {
+      this.audit.record({
+        actorId: userId,
+        action: 'session.logout',
+        entity: 'RefreshSession',
+      });
+    }
+    return result.count === 1;
   }
 
   /** Active sessions of one user, newest first, flagged against currentHash. */
@@ -183,5 +234,4 @@ export class SessionsService {
     }
     return { revoked: res.count };
   }
-
 }

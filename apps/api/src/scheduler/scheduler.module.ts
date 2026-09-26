@@ -9,6 +9,7 @@ import { MaintenanceModule } from '../maintenance/maintenance.module';
 import { ComplianceModule } from '../compliance/compliance.module';
 import { VotesModule } from '../votes/votes.module';
 import { AuditModule } from '../audit/audit.module';
+import { KpiModule } from '../kpi/kpi.module';
 import { SchedulerService } from './scheduler.service';
 import { SchedulerController } from './scheduler.controller';
 
@@ -23,6 +24,7 @@ import { SchedulerController } from './scheduler.controller';
     ComplianceModule,
     VotesModule,
     AuditModule,
+    KpiModule,
   ],
   controllers: [SchedulerController],
   providers: [SchedulerService],

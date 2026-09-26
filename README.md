@@ -15,7 +15,7 @@ Web SaaS for Greek apartment-building (*polykatoikia*) shared-expense management
 - **PSP abstraction** — `Viva` (GR, card + IRIS), `Stripe`/`StripeJP` (EU/US/EU) and `MercadoPago` (BR/MX/AR/CL/CO/PE) behind `PspAdapter`; `PaymentOrder` checkout, webhook reconciliation (`POST /api/payments/webhook/:provider` with server-side re-verification), IRIS QR + deep-link.
 - **Arrears & automation** — `buildArrears()` buckets, `LateFeeCharge` (FLAT/PERCENT, cap, waive), `PaymentPlan` (2–24 δόσεις), email (Resend) + SMS (≤160 chr Greek) reminders via `SchedulerService` crons (`JobRun` ledger, `JOB_SCHEDULER_ENABLED`).
 - **Treasury / Reserve / Levies** — `TreasuryAccount`/`Entry`, `ReserveFund` contributions & drawdowns, `ExtraordinaryLevy` with `LevyShare` (MILIMES/UNITS/SQUARE_METERS/SHARE_FRACTION).
-- **myDATA (ΑΑΔΕ)** — `MyDataInvoice` with synthetic MARKs (offline) or live `SendInvoiceDocs` + `POST /api/mydata/reconcile`; supplier invoices with Greek OCR (`supplier-invoices/ocr.service.ts` — `ΑΦΜ`/`€`/`DD/MM/YYYY` parsing) and myDATA JSON import.
+- **myDATA (ΑΑΔΕ, GR only)** — `MyDataInvoice` with synthetic MARKs (offline) or live `SendInvoiceDocs` + `POST /api/mydata/reconcile`; generation fails closed unless `MYDATA_VAT_RATE_BPS` is explicitly configured. Non-GR buildings do not use this adapter; live AADE validation remains external QA.
 - **Bank & open-banking** — tolerant GR-bank CSV parser + `BankConnection`/`ImportedTransaction` feed (offline fixture or GoCardless skeleton), confidence-scored `suggestMatches` → `apply`.
 
 **Governance & marketplace**
@@ -31,9 +31,9 @@ Web SaaS for Greek apartment-building (*polykatoikia*) shared-expense management
 - **Security & compliance** — `helmet`, `CORS_ORIGINS`, global `ValidationPipe`, `ThrottlerModule` per-route (`login 5/15m`, `register 3/h`, `checkout 10/m`, `webhook 100/m`, `assistant 10/day`, `api-key 60/m`), `LoginLockoutService` (423 after 5 fails), 2FA TOTP + recovery codes, `AuditLog` hash chain (`_hash/_prev` via `audit.service.ts`), GDPR export/erasure, CCPA/LGPD-ready, `GET /api/audit/verify`.
 - **Notifications & PWA** — in-app `Notification` inbox + Web Push (VAPID) + `RealtimeService` (SSE `notification.created`, `vote.closed`, `assembly.attendance`), scheduler-fed `check-anomalies` → admin push, installable PWA shell.
 - **Ops & observability** — scheduled billing jobs (`SchedulerService` 7 crons), `BuildingWeeklySnapshot` + `AlertRule` (`COLLECTION_RATE`/`ARREARS_WOW`/`DEFECTS_7D`/`PSP_FAILURES`), arrears **forecast** (`GET /buildings/:id/kpi/forecast` local tabular risk), Sentry (api+web), `GET /health` (db ping → degraded), GitHub Actions CI + nightly `pg_dump` backup (`backup.yml`, S3 SSE-KMS, 30-day retention, `docs/RUNBOOK.md` RTO≤2h).
-- **Local AI for Greek market** — `assistant` RAG with `faq.el.md` (Ν.1221/1981, Ν.4756/2020, myDATA, ρόπα), `AI_LOCAL_ONLY=true` (Ollama `meltemi:7b` / `llama3.1`, `bge-m3` via `pgvector`), `LLM_PROVIDER=auto|openai|anthropic|openai-compatible`, PII redaction, defect classifier (`POST /buildings/:id/assistant/classify-defect` — `Υδραυλικά/Ηλεκτρολογικά/Ανελκυστήρας` + urgency), NL→SQL ops copilot (`POST .../assistant/nl-sql` SELECT-only, 10/day), Greek email/SMS draft & myDATA error translator — see [`docs/AI_LOCAL_FEATURES_GR.md`](docs/AI_LOCAL_FEATURES_GR.md).
+- **Local AI for Greek market** — `assistant` lexical RAG with `faq.el.md` (Ν.1221/1981, Ν.4756/2020, myDATA, ρόπα), `AI_LOCAL_ONLY=true` with loopback-only compatible endpoints, request timeouts, context/question PII redaction, and a deterministic defect classifier (`POST /buildings/:id/assistant/classify-defect`). NL→SQL is intentionally unregistered/unavailable until a parameterized, allowlisted read-only implementation exists. Greek email/SMS draft and myDATA error translation remain planned/partial — see [`docs/AI_LOCAL_FEATURES_GR.md`](docs/AI_LOCAL_FEATURES_GR.md).
 - **Mobile (Expo)** — `apps/mobile` (Expo 51, React Native 0.74) with `Login` (2FA), `Balance` (`/invoices/mine`, `formatMoney` with `currency/locale`), `Votes`, `Shop` (`catalog`/`orders`), `Feed` (`/feed`), tab navigation, `AsyncStorage` session restore, `@polykatoikia/mobile:test` 7 tests green.
-- **International** — `Building.market`/`currency`/`pspProvider` (`market.ts` registry GR/EU/US/CA/MX/BR/AR/CL/CO/PE), `formatMoney(cents,{currency,locale})` + `MoneyPipe`, `SUPPORTED_LANGUAGES=[el,en,zh,pt,ja,es]` with `public/i18n/*.json` (129 keys) and `LOCALE_TO_INTL` map.
+- **International** — `Building.market`/`currency`/`pspProvider` (`market.ts` registry GR/EU/US/CA/MX/BR/AR/CL/CO/PE/JP), explicit market/currency/provider compatibility validation, zero-decimal CLP/COP/JPY support, `formatMoney(cents,{currency,locale})` + `MoneyPipe`, and `SUPPORTED_LANGUAGES=[el,en,zh,pt,ja,es]`.
 
 ## Stack
 
@@ -41,12 +41,12 @@ Web SaaS for Greek apartment-building (*polykatoikia*) shared-expense management
 |---|---|
 | Monorepo | Nx 23.1.1 · pnpm 10 · `nx.json` plugins (playwright/eslint/webpack/jest) |
 | Frontend | Angular 22 standalone + signals + lazy routes · Tailwind 4 · Vitest · `i18n.service` (`es` added), `MoneyPipe` |
-| Backend | NestJS 11 · Prisma 6 · PostgreSQL 16 + `pgvector` optional |
+| Backend | NestJS 11 · Prisma 6 · PostgreSQL 16 (`pgvector` is a future/optional extension, not required by current lexical RAG) |
 | Shared | `libs/shared` (`market.ts`, `money`, `ownership-weights`, DTOs) |
 | Auth | `@nestjs/jwt` · `bcryptjs` · TOTP (`two-factor`) · `LoginLockoutService` |
 | Payments | `Viva` + `Stripe`/`StripeJP` + `MercadoPago` adapters behind `PspAdapter` |
 | Files | `LocalDiskStorage` / `S3Storage` (`@aws-sdk/client-s3` 3.1121) |
-| AI | Ollama (`meltemi:7b`/`llama3.1`) · `bge-m3` embeddings · `assistant/defect-classifier` · `kpi/forecast` · `assembly/praktiko/draft` |
+| AI | Ollama/local OpenAI-compatible endpoint (optional) · guarded provider routing/timeouts · lexical `faq.el.md` RAG · deterministic `assistant/defect-classifier`; embedding/pgvector and NL→SQL remain unavailable |
 | Email/SMS | Resend (console fallback) · `SmsSender` HTTP gateway |
 | Tests | Jest 30 (≈1137 api), Vitest 4 · Playwright e2e |
 | Infra | Docker Compose (db) · Render/Railway (api) · static hosting (web) |
@@ -70,7 +70,7 @@ apps/
       mydata/ exports/ pdf/ branding/ campaigns/ points/ permissions/ security/ (throttle/lockout) / health/
       audit/           # hash chain (_hash/_prev) + verify
       kpi/             # snapshots, rules, check-anomalies, forecastArrears
-      assistant/       # RAG (faq.el.md), llm-provider (AI_LOCAL_ONLY), defect-classifier, nl-sql
+      assistant/       # lexical RAG (faq.el.md), guarded llm-provider, PII redaction, defect-classifier; NL→SQL unregistered
       common/ tenant.ts
   web/                 # Angular 22 SPA (port 4200, proxy /api → :3000)
     src/app/
@@ -147,7 +147,7 @@ All vars documented in [`.env.example`](.env.example):
 | `BUILDING_*` via `PATCH /buildings/:id/settings` | `market` (`GR` default), `currency` (`EUR`), `pspProvider` (`viva`), `invoiceRegistrationNo` (`T+13`) | — |
 | `RESEND_API_KEY` / `MAIL_FROM` | Resend; empty → console | `""` / `no-reply@polykatoikiaos.gr` |
 | `APP_BASE_URL` / `WEB_APP_URL` | Public web origin | `http://localhost:4200` |
-| `MYDATA_MODE` / `MYDATA_BASE_URL` / `MYDATA_USER_ID` / `MYDATA_CLIENT_SECRET` / `MYDATA_SUBSCRIPTION_KEY` | AADE myDATA (`offline` synthetic MARKs or `live`) | `offline` |
+| `MYDATA_MODE` / `MYDATA_BASE_URL` / `MYDATA_USER_ID` / `MYDATA_CLIENT_SECRET` / `MYDATA_SUBSCRIPTION_KEY` / `MYDATA_VAT_RATE_BPS` | Greek-only AADE myDATA (`offline` synthetic MARKs or credentialed `live`); VAT rate is explicit | `offline` / unset VAT |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | Web Push (`npx web-push generate-vapid-keys`) | `""` |
 | `SENTRY_DSN` / `SENTRY_ENVIRONMENT` | Error tracking | `""` |
 | `CORS_ORIGINS` / `SWAGGER_ENABLED` | Security; Swagger auto outside prod | `http://localhost:4200` |
@@ -157,8 +157,8 @@ All vars documented in [`.env.example`](.env.example):
 | `OPENBANKING_MODE` / `GC_SECRET_ID` / `GC_SECRET_KEY` | `offline` fixture or GoCardless | `offline` |
 | `COMMISSION_RATE_BPS` / `COMMISSION_CAP_CENTS` | Marketplace take-rate (400=4%, cap €500) | `400`/`50000` |
 | `POSTHOG_KEY` / `POSTHOG_HOST` | Analytics (empty → disabled) | `""` / `https://eu.i.posthog.com` |
-| `LLM_PROVIDER` / `LLM_API_URL` / `LLM_API_KEY` / `LLM_MODEL` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Copilot (`auto` default, `openai-compatible` for Ollama) | `auto` / `http://localhost:11434/v1/chat/completions` / `ollama` / `meltemi:7b` |
-| `AI_LOCAL_ONLY` / `PGVECTOR_ENABLED` / `EMBEDDING_MODEL` / `AI_TOKEN_BUDGET_PER_BUILDING` | Greek local guard (true = never call hosted), RAG vector | `false`/`false`/`bge-m3`/`50000` |
+| `LLM_PROVIDER` / `LLM_API_URL` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_TIMEOUT_MS` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Copilot routing and hard request timeout; `LLM_TIMEOUT_MS` is an optional deployment setting; `AI_LOCAL_ONLY=true` accepts loopback/private compatible endpoints only | `auto` / `http://localhost:11434/v1/chat/completions` / `ollama` / `meltemi:7b` / `15000` |
+| `AI_LOCAL_ONLY` / `PGVECTOR_ENABLED` / `EMBEDDING_MODEL` / `AI_TOKEN_BUDGET_PER_BUILDING` | Greek local guard (true = never call hosted); vector/budget flags are documented future controls and are not active RAG features | `false`/`false`/`bge-m3`/`50000` |
 | `JOB_SCHEDULER_ENABLED` | Run crons on single replica only | `false` |
 | `PORT` | API port | `3000` |
 
@@ -195,13 +195,13 @@ Global prefix `api` (`apps/api/src/main.ts:13`). Auth `Authorization: Bearer <ac
 | Module | Base route | Notes |
 |---|---|---|
 | `auth` | `/api/auth` | `POST register/login/login/2fa/refresh/switch-building/change-password/change-email`, `GET me/buildings`, `POST 2fa/*` |
-| `assistant` | `/api/buildings/:id/assistant` | `POST query` (RAG, 10/day, Greek), `POST classify-defect` (local `Υδραυλικά`/`high`), `POST nl-sql` (SELECT-only, audited) |
+| `assistant` | `/api/buildings/:id/assistant` | `POST query` (lexical RAG, 10/day, Greek), `POST classify-defect` (local `Υδραυλικά`/`high`); NL→SQL is not registered |
 | `assembly` | `/api/votes/:id` | `GET agenda`, `POST agenda`, `PATCH/DELETE agenda/:id`, `GET/POST attendance`, `GET praktiko`, `GET praktiko/draft` (local LLM) |
 | `buildings` | `/api/buildings` | `POST`, `GET mine`, `PATCH :id/settings` (`market/currency/pspProvider/invoiceRegistrationNo`) |
 | `units` | `/api/units` | `POST/GET/PATCH/DELETE`, `squareMeters`/`shareFraction` for `SQUARE_METERS`/`SHARE_FRACTION` |
 | `expense-categories` | `/api/expense-categories` | `MILIMES/UNITS/CUSTOM/RADIATORS/ELEVATOR_FLOORS/METERS/SQUARE_METERS/SHARE_FRACTION/HEADCOUNT` |
 | `expenses` | `/api/expenses` | creates `Share` rows via largest-remainder |
-| `invoices` | `/api/invoices` | `POST run`, `GET mine`, `GET :id`, `GET :id/pdf` (pdfkit + NotoSansJP) |
+| `invoices` | `/api/invoices` | `POST run`, `GET mine`, `GET :id`, `GET :id/pdf` (locale/currency-aware pdfkit; optional explicitly configured font) |
 | `payments` | `/api/payments` | `POST checkout/:invoiceId` (psp by building), `POST webhook/:provider`, `GET arrears`, `GET invoices/mine/pdf` |
 | `reminders` | `/api/reminders` | `POST run`/`POST preview` (Resend/SMS), Greek `≤160chr` |
 | `exports` | `/api/exports` | `GET ledger.csv`, `GET receipt/:invoiceId` |
@@ -256,14 +256,14 @@ pnpm exec prisma studio --schema=apps/api/prisma/schema.prisma
 ## Testing
 
 - **Unit** — split engine (largest-remainder property Σ=total), `aggregateRun`, `buildArrears`, `tallyVote`, `buildLedger`, `formatMoney` (`el-GR`/`en-US`/`pt-BR`/`es-ES`), `MoneyPipe` (building currency), `LocalDiskStorage`/`S3Storage` (fallback), `defect-classifier` (`Υδραυλικά/high`), `kpi.forecast` (tabular risk), `praktiko/draft` fallback, `AuditService` hash chain — all adjacent `*.spec.ts`.
-- **Integration** — `api:test` 1137 tests, `web:test` 55 (Vitest), `mobile:test` 7, `shared:test` 12 — tenant isolation + idempotency + 2FA vectors.
+- **Integration** — API/web/mobile/shared counts vary by concurrent worktree; run the Nx target and use its output rather than treating the historical counts above as a certification.
 - **E2E** — Playwright `admin creates month → resident pays → webhook marks paid` + vote lifecycle.
-- **AI golden-set** — 50 Greek Q&A (χιλιοστά, myDATA, deadlines) for Meltemi vs Llama in `docs/AI_LOCAL_FEATURES_GR.md`.
+- **AI golden-set** — the 50-question Greek evaluation described in `docs/AI_LOCAL_FEATURES_GR.md` is **not run in the default test target**; record it as external/staging QA rather than a passing local suite.
 
 ```bash
 pnpm nx run-many -t test --all
 pnpm nx e2e web-e2e
-pnpm exec jest apps/api/src/assistant --no-coverage # RAG + classify + nl-sql
+pnpm exec jest apps/api/src/assistant --no-coverage # lexical RAG + provider safety + classifier/redaction
 ```
 
 ## Deployment Notes
@@ -272,15 +272,19 @@ pnpm exec jest apps/api/src/assistant --no-coverage # RAG + classify + nl-sql
 - Frontend static `dist/apps/web/browser` — set `apiUrl` in `environment.production.ts` if not proxied.
 - Health: `pg_isready` (compose) + `GET /api/health` (db ping → `degraded`) + `GET /api/audit/verify`.
 - Backups: `docker` or managed Postgres; nightly `pg_dump --format=custom` via `.github/workflows/backup.yml` (S3 SSE-KMS, 30-day retention) + monthly `transfer` JSON per building — `docs/RUNBOOK.md` RPO≤24h RTO≤2h.
-- AI local: `ollama serve` + `ollama pull meltemi:7b bge-m3` + `AI_LOCAL_ONLY=true`; `pgvector` extension optional (`PGVECTOR_ENABLED=true`).
+- AI local: `ollama serve` + `ollama pull meltemi:7b` + `AI_LOCAL_ONLY=true`; lexical FAQ retrieval works without a vector database. `bge-m3`/`pgvector` are future optional extensions, not a shipped dependency.
 
 ## Roadmap
 
-Phases per [`docs/PLAN.md`](docs/PLAN.md) and [`docs/FEATURE_PLAN.md`](docs/FEATURE_PLAN.md) — **all 34 phases done (0–8 core + 9–18 commercial)**: recurring & statements, bank CSV + open-banking, analytics + security + invites + compliance + budgets + payouts + transfer, Excel import, ρόπα, 2FA, SMS, accountant seat, self-billing, digital assembly (quorum meter + πρακτικό), open-banking sync, meters/METERS, announcements, payment plans, branding, commissions/featured, referrals, partner leads, trust & ops (device management, `PostHog`, help tours).
+Phases per [`docs/PLAN.md`](docs/PLAN.md) and [`docs/FEATURE_PLAN.md`](docs/FEATURE_PLAN.md) — the core/commercial feature scaffolding is present, but implementation and external QA status varies by module; do not treat the phase labels as a certification of live integrations.
 
-**International (`docs/INTERNATIONAL_PLAN.md`) — P0 done:** `Building.market`/`currency`/`pspProvider` registry (`market.ts` 10 codes, 13 currencies), `PaymentMethod` `PIX/ACH/SPEI/SEPA_DD/INTERAC`, `AllocationStrategy` `SQUARE_METERS/SHARE_FRACTION/HEADCOUNT`, `Unit.squareMeters/shareFraction`, `formatMoney`/`MoneyPipe` + `SUPPORTED_LANGUAGES=[el,en,zh,pt,ja,es]` (129 keys, `LOCALE_TO_INTL`).
+**International (`docs/INTERNATIONAL_PLAN.md`) — partial:** the shared registry now covers GR/EU/US/CA/MX/BR/AR/CL/CO/PE/JP, currency minor units (including CLP/COP/JPY), and cross-field settings validation. Live PSP rails, country-specific tax adapters, and schema-backed tax breakdowns remain follow-ups.
 
-**AI local (`docs/AI_LOCAL_FEATURES_GR.md`, `docs/FEATURE_PLAN.md:17`) — P0/P1 done:** RAG `faq.el.md` (Ν.1221/1981), `AI_LOCAL_ONLY` guard, Meltemi 7B via Ollama, BGE-M3 + `pgvector` scaffold, supplier OCR (`ΑΦΜ`), defect triage, arrears forecast, πρακτικό draft + NL→SQL (SELECT-only, audited). Remaining sandbox QA: AADE live credentials (XSD mapping done), Viva IRIS e2e in demo PSP.
+**AI local (`docs/AI_LOCAL_FEATURES_GR.md`) — partial:** lexical RAG, local-only URL enforcement/timeouts, PII redaction, and deterministic defect triage are implemented. pgvector embeddings, OCR/forecast quality targets, and NL→SQL are not complete; NL→SQL is deliberately unavailable/unregistered. AADE live credentials and provider sandbox flows remain external QA.
+
+## Known schema / integration follow-ups
+
+This change set does **not** edit Prisma schema or migrations. Before enabling non-GR tax filing or fully automated myDATA, the data layer still needs an explicit invoice VAT/net breakdown (or a validated source), market/country constraints, and an auditable e-invoice adapter boundary. Ownership `periodEnd` and any new money/tax fields also need service-layer wiring and migration review. The current myDATA path intentionally fails closed when `MYDATA_VAT_RATE_BPS` is absent. Live AADE submission/reconciliation, PSP webhooks, and any pgvector embedding store also require external credentials and staging QA; unit tests do not certify those integrations.
 
 ## License
 

@@ -16,6 +16,7 @@ export interface OccupancyDto {
   votingEligible: boolean;
   residentRole?: string | null;
   periodStart?: string | null;
+  periodEnd?: string | null;
   user?: { firstName: string; lastName: string; email: string } | null;
 }
 
@@ -27,6 +28,7 @@ export interface SetOccupancyDto {
   residentRole?: string | null;
   shareMillimes?: number;
   periodStart?: string;
+  periodEnd?: string;
 }
 
 /** Voting eligibility rule — per building + category */

@@ -24,9 +24,19 @@ import { ownerDisplayName, buildUnitStatement } from '../exports/statements';
 import { ExportsService } from '../exports/exports.service';
 import { PayoutsService } from '../payouts/payouts.service';
 import { GrantAccountantDto } from './dto/grant-accountant.dto';
-import { buildApologismos } from './apologismos';
+import {
+  buildApologismos,
+  type ApologismosSupplierPayment,
+} from './apologismos';
 
 const YEAR_REGEX = /^\d{4}$/;
+
+function yearWindow(year: number): { gte: Date; lt: Date } {
+  return {
+    gte: new Date(Date.UTC(year, 0, 1)),
+    lt: new Date(Date.UTC(year + 1, 0, 1)),
+  };
+}
 
 /**
  * Read-only seat for external λογιστές. Every read first verifies an
@@ -260,20 +270,28 @@ export class AccountantSeatService {
     }
     const session = await this.actor(user, buildingId);
 
-    const [building, compare, expenseGroups, invoices, units, expenses, ownerships] =
+    const numericYear = Number(year);
+    const nextYear = String(numericYear + 1).padStart(4, '0');
+    const currentPeriodPrefix = `${year}-`;
+    const priorPeriodPrefix = `${year}-01`;
+    const supplierPaymentDelegate = (this.prisma as any).supplierPayment;
+    const [building, compare, expenseGroups, invoices, units, expenses, ownerships, supplierPayments] =
       await Promise.all([
         this.prisma.building.findUnique({
           where: { id: buildingId },
           select: { name: true },
         }),
-        this.budgets.compare(buildingId, Number(year), session),
+        this.budgets.compare(buildingId, numericYear, session),
         this.prisma.expense.groupBy({
           by: ['categoryId'],
-          where: { buildingId, periodYearMonth: { startsWith: `${year}-` } },
+          where: { buildingId, periodYearMonth: { startsWith: currentPeriodPrefix } },
           _sum: { totalCents: true },
         }),
+        // Keep all invoices through the requested year.  The current-year
+        // monthly series filters these in the pure builder, while older rows
+        // are needed for opening arrears.
         this.prisma.invoice.findMany({
-          where: { buildingId, periodYearMonth: { startsWith: `${year}-` } },
+          where: { buildingId, periodYearMonth: { lt: `${nextYear}-01` } },
           select: {
             periodYearMonth: true,
             totalCents: true,
@@ -287,7 +305,7 @@ export class AccountantSeatService {
           select: { id: true, label: true },
         }),
         this.prisma.expense.findMany({
-          where: { buildingId, periodYearMonth: { startsWith: `${year}-` } },
+          where: { buildingId, periodYearMonth: { startsWith: currentPeriodPrefix } },
           include: { shares: true },
           orderBy: [{ periodYearMonth: 'asc' }, { description: 'asc' }],
         }),
@@ -298,6 +316,18 @@ export class AccountantSeatService {
             user: { select: { firstName: true, lastName: true } },
           },
         }),
+        supplierPaymentDelegate?.findMany
+          ? supplierPaymentDelegate.findMany({
+              where: {
+                buildingId,
+                paidAt: yearWindow(numericYear),
+              },
+              select: {
+                amountCents: true,
+                expense: { select: { categoryId: true } },
+              },
+            })
+          : Promise.resolve([]),
       ]);
     if (!building) {
       throw new NotFoundException('Building not found');
@@ -316,6 +346,19 @@ export class AccountantSeatService {
       return names.length > 0 ? names.join(', ') : undefined;
     };
 
+    const currentInvoices = invoices.filter((invoice) =>
+      invoice.periodYearMonth.startsWith(currentPeriodPrefix),
+    );
+    const priorArrearsByUnit: Record<string, number> = {};
+    for (const invoice of invoices) {
+      if (invoice.periodYearMonth >= priorPeriodPrefix) continue;
+      const unitId = invoice.unitId;
+      if (!unitId) continue;
+      priorArrearsByUnit[unitId] =
+        (priorArrearsByUnit[unitId] ?? 0) +
+        Math.max(0, invoice.totalCents - invoice.paidCents);
+    }
+
     const unitBalances = units.map((unit) => {
       const statement = buildUnitStatement({
         buildingName: building.name,
@@ -324,7 +367,7 @@ export class AccountantSeatService {
         ...(ownerNameOf(unit.id) ? { ownerName: ownerNameOf(unit.id) } : {}),
         year,
         expenses,
-        invoices,
+        invoices: currentInvoices,
       });
       return {
         unitId: unit.id,
@@ -335,6 +378,12 @@ export class AccountantSeatService {
         balanceCents: statement.totals.balanceCents,
       };
     });
+
+    const supplierPaymentRows: ApologismosSupplierPayment[] =
+      (supplierPayments ?? []).map((payment: any) => ({
+        amountCents: payment.amountCents,
+        categoryId: payment.expense?.categoryId ?? null,
+      }));
 
     return buildApologismos({
       buildingId,
@@ -347,8 +396,10 @@ export class AccountantSeatService {
         categoryName: line.categoryName,
         plannedCents: line.plannedCents,
       })),
+      supplierPayments: supplierPaymentRows,
       invoices,
       unitBalances,
+      priorYearArrearsByUnit: priorArrearsByUnit,
     });
   }
 }

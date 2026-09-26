@@ -15,6 +15,13 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { aggregateRun } from './run-invoices';
+import {
+  effectiveBuildingOwnershipWhere,
+  effectiveOwnershipWhere,
+  endOfBillingPeriod,
+  isEffectiveOwnership,
+  requireActiveBuildingId,
+} from '../ownerships/ownership-scope';
 import { RunInvoicesDto } from './dto/run-invoices.dto';
 
 const INVOICE_WITH_UNIT = Prisma.validator<Prisma.InvoiceInclude>()({
@@ -45,6 +52,13 @@ export class InvoicesService {
       throw new BadRequestException('Building not found');
     }
 
+    if (
+      building.units.some(
+        (unit) => !Number.isSafeInteger(unit.millimes) || unit.millimes <= 0,
+      )
+    ) {
+      throw new BadRequestException('Every unit must have positive integer millimes');
+    }
     const millimesTotal = building.units.reduce(
       (sum, unit) => sum + unit.millimes,
       0,
@@ -57,18 +71,96 @@ export class InvoicesService {
 
     const expenses = await this.prisma.expense.findMany({
       where: { buildingId, periodYearMonth },
-      include: { shares: { select: { unitId: true, amountCents: true } } },
+      select: {
+        id: true,
+        totalCents: true,
+        shares: { select: { unitId: true, amountCents: true } },
+      },
     });
     if (expenses.length === 0) {
       throw new BadRequestException('no expenses for period');
     }
 
-    const totals = new Map(aggregateRun(expenses).map((entry) => [entry.unitId, entry.totalCents]));
+    const unitIds = new Set(building.units.map((unit) => unit.id));
+    for (const expense of expenses) {
+      let shareTotal = 0;
+      for (const share of expense.shares) {
+        if (!unitIds.has(share.unitId)) {
+          throw new BadRequestException(
+            `Expense ${expense.id ?? ''} contains a share for a unit outside the building`,
+          );
+        }
+        if (!Number.isSafeInteger(share.amountCents) || share.amountCents < 0) {
+          throw new BadRequestException('Expense shares must be non-negative integers');
+        }
+        shareTotal += share.amountCents;
+      }
+      if (
+        typeof expense.totalCents === 'number' &&
+        shareTotal !== expense.totalCents
+      ) {
+        throw new BadRequestException(
+          `Expense ${expense.id ?? ''} shares do not add up to its total`,
+        );
+      }
+    }
+
+    const totals = new Map(
+      aggregateRun(expenses).map((entry) => [entry.unitId, entry.totalCents]),
+    );
+
+    // An invoice is an issued financial document.  Once any invoice exists
+    // for this building/period, compare the complete expected document set
+    // before touching Prisma.  This makes a same-input rerun a true no-op and
+    // rejects a changed issued/paid period instead of silently repricing it.
     const existing = await this.prisma.invoice.findMany({
       where: { buildingId, periodYearMonth },
+      select: {
+        id: true,
+        unitId: true,
+        totalCents: true,
+        paidCents: true,
+        status: true,
+      },
     });
-    const paidByUnitId = new Map(existing.map((invoice) => [invoice.unitId, invoice.paidCents]));
+    if (existing.length > 0) {
+      const existingByUnit = new Map(
+        existing.map((invoice) => [invoice.unitId, invoice]),
+      );
+      const changes: string[] = [];
+      for (const invoice of existing) {
+        const expected = totals.get(invoice.unitId);
+        if (!unitIds.has(invoice.unitId)) {
+          changes.push(`unexpected unit ${invoice.unitId}`);
+        } else if (expected === undefined || invoice.totalCents !== expected) {
+          changes.push(
+            `unit ${invoice.unitId} (${invoice.totalCents} → ${expected ?? 0})`,
+          );
+        }
+        if (invoice.paidCents < 0 || invoice.paidCents > invoice.totalCents) {
+          changes.push(`unit ${invoice.unitId} has an inconsistent paid amount`);
+        }
+      }
+      for (const unit of building.units) {
+        const expected = totals.get(unit.id) ?? 0;
+        if (!existingByUnit.has(unit.id)) {
+          changes.push(`new unit ${unit.id} (${expected})`);
+        }
+      }
+      if (changes.length > 0) {
+        throw new BadRequestException(
+          `Invoices for ${periodYearMonth} were already issued and are immutable; no repricing was performed: ${changes.join(', ')}`,
+        );
+      }
+      return this.listForPeriod(buildingId, periodYearMonth);
+    }
 
+    const paidByUnitId = new Map(
+      existing.map((invoice) => [invoice.unitId, invoice.paidCents]),
+    );
+    // The period is not issued yet.  Use an empty update in the upsert so a
+    // concurrent rerun can never overwrite a total/status that appeared after
+    // the preflight read.
     await this.prisma.$transaction(
       building.units.map((unit) => {
         const totalCents = totals.get(unit.id) ?? 0;
@@ -89,7 +181,7 @@ export class InvoicesService {
             paidCents,
             status,
           },
-          update: { totalCents, status },
+          update: {},
         });
       }),
     );
@@ -101,7 +193,7 @@ export class InvoicesService {
       action: 'invoice.run',
       entity: 'invoice',
       entityId: periodYearMonth,
-      metadata: { units: building.units.length },
+      metadata: { units: building.units.length, immutable: true },
     });
 
     void this.notifyOwners(buildingId, periodYearMonth);
@@ -113,13 +205,16 @@ export class InvoicesService {
     buildingId: string,
     periodYearMonth: string,
   ): Promise<void> {
+    const at = endOfBillingPeriod(periodYearMonth);
     const owners = await this.prisma.ownership.findMany({
-      where: { unit: { buildingId } },
-      select: { userId: true },
+      where: effectiveBuildingOwnershipWhere(buildingId, at),
       distinct: ['userId'],
     });
+    const effectiveOwners = owners.filter((owner) =>
+      isEffectiveOwnership(owner, at),
+    );
     await this.notifications.createForUsers(
-      owners.map((owner) => owner.userId),
+      effectiveOwners.map((owner) => owner.userId),
       {
         type: 'invoice.issued',
         title: 'Νέο κοινοχρήστους λόγος',
@@ -150,19 +245,31 @@ export class InvoicesService {
     periodYearMonth: string | undefined,
     user: AuthenticatedUser,
   ) {
+    const buildingId = requireActiveBuildingId(user);
+    const period =
+      periodYearMonth === undefined
+        ? undefined
+        : requireValidPeriod(periodYearMonth);
+    const at = period ? endOfBillingPeriod(period) : new Date();
     const ownerships = await this.prisma.ownership.findMany({
-      where: { userId: user.id },
-      select: { unitId: true },
+      where: effectiveOwnershipWhere(user.id, buildingId, at),
     });
-    const unitIds = ownerships.map((ownership) => ownership.unitId);
+    const unitIds = [
+      ...new Set(
+        ownerships
+          .filter((ownership) => isEffectiveOwnership(ownership, at))
+          .map((ownership) => ownership.unitId),
+      ),
+    ];
     if (unitIds.length === 0) {
-      throw new ForbiddenException('User owns no units');
+      throw new ForbiddenException('User has no effective ownership in the active building');
     }
 
     return this.prisma.invoice.findMany({
       where: {
+        buildingId,
         unitId: { in: unitIds },
-        ...(periodYearMonth ? { periodYearMonth } : {}),
+        ...(period ? { periodYearMonth: period } : {}),
       },
       include: INVOICE_WITH_UNIT,
       orderBy: { periodYearMonth: 'desc' },

@@ -3,11 +3,13 @@ import type { ParsedBankRowDto } from '@org/shared';
 const DATE_KEYS = ['ημερομηνια', 'ημνια', 'date'];
 const AMOUNT_KEYS = ['ποσο', 'amount'];
 const REFERENCE_KEYS = ['αιτιολογια', 'περιγραφη', 'reference', 'description'];
+const CURRENCY_KEYS = ['currency', 'currencycode', 'ccy', 'ccycode', 'νομισμα', 'νομισμακωδικος'];
 
 interface ColumnMap {
   dateIdx: number;
   amountIdx: number;
   referenceIdx: number;
+  currencyIdx: number;
 }
 
 function normalizeField(raw: string): string {
@@ -71,7 +73,12 @@ function detectDelimiter(lines: string[]): string {
 }
 
 function columnsFromHeader(fields: string[]): ColumnMap | null {
-  const map: ColumnMap = { dateIdx: -1, amountIdx: -1, referenceIdx: -1 };
+  const map: ColumnMap = {
+    dateIdx: -1,
+    amountIdx: -1,
+    referenceIdx: -1,
+    currencyIdx: -1,
+  };
   fields.forEach((field, idx) => {
     const key = normalizeField(field);
     if (!key) return;
@@ -79,6 +86,8 @@ function columnsFromHeader(fields: string[]): ColumnMap | null {
     else if (map.amountIdx < 0 && AMOUNT_KEYS.includes(key)) map.amountIdx = idx;
     else if (map.referenceIdx < 0 && REFERENCE_KEYS.includes(key))
       map.referenceIdx = idx;
+    else if (map.currencyIdx < 0 && CURRENCY_KEYS.includes(key))
+      map.currencyIdx = idx;
   });
   return map.dateIdx >= 0 || map.amountIdx >= 0 ? map : null;
 }
@@ -170,15 +179,32 @@ export function parseBankCsv(text: string): ParsedBankRowDto[] {
 
   const rows: ParsedBankRowDto[] = [];
   for (const fields of dataRows) {
-    const cols = columns ?? { dateIdx: 0, amountIdx: 1, referenceIdx: 2 };
+    const cols = columns ?? {
+      dateIdx: 0,
+      amountIdx: 1,
+      referenceIdx: 2,
+      currencyIdx: -1,
+    };
     const dateIso = parseBankDate(fields[cols.dateIdx] ?? '');
-    const amountCents = parseBankAmountCents(fields[cols.amountIdx] ?? '');
+    const amountRaw = fields[cols.amountIdx] ?? '';
+    const amountCents = parseBankAmountCents(amountRaw);
     if (!dateIso || amountCents === null || amountCents <= 0) continue;
+    const explicitCurrency = (fields[cols.currencyIdx] ?? '').trim().toUpperCase();
+    // Positional exports commonly append currency as a fourth column.  Also
+    // recognize a currency token attached to the amount (100.00 EUR).
+    const currency =
+      (explicitCurrency && /^[A-Z]{3}$/.test(explicitCurrency)
+        ? explicitCurrency
+        : null) ??
+      (!columns && /^[A-Za-z]{3}$/.test((fields[3] ?? '').trim())
+        ? fields[3].trim().toUpperCase()
+        : null);
     rows.push({
       dateIso,
       amountCents,
       reference: (fields[cols.referenceIdx] ?? '').trim(),
-    });
+      ...(currency && /^[A-Z]{3}$/.test(currency) ? { currency } : {}),
+    } as (typeof rows)[number]);
   }
   return rows;
 }

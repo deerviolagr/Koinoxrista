@@ -1,4 +1,5 @@
 import type { Role } from './domain';
+import type { CurrencyCode, MarketCode, PspProvider } from './market';
 
 /** Multi-building tenancy (Phase 4): membership of a user in a building. */
 
@@ -8,10 +9,10 @@ export interface MembershipBuilding {
   address?: string;
   city?: string;
   /** Synthetic region code (GR/EU/US/MX/BR…) — defaults to GR. */
-  market?: string;
+  market?: MarketCode;
   /** ISO-4217 currency for the building — defaults to EUR. */
-  currency?: string;
-  pspProvider?: string | null;
+  currency?: CurrencyCode;
+  pspProvider?: PspProvider | null;
 }
 
 export interface MembershipDto {

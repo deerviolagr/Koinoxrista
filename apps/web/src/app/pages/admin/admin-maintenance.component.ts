@@ -1,6 +1,6 @@
 import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
-import { EMPTY, catchError, forkJoin } from 'rxjs';
+import { EMPTY, catchError } from 'rxjs';
 import type {
   BuildingAssetDto,
   CalendarEventDto,
@@ -11,6 +11,7 @@ import type {
 } from '@org/shared';
 import { BuildingsApiService } from '../../core/api/buildings-api.service';
 import { CategoriesApiService } from '../../core/api/categories-api.service';
+import { InspectionsApiService, InspectionRecordDto, InspectionResult } from '../../core/api/inspections-api.service';
 import { MaintenanceApiService } from '../../core/api/maintenance-api.service';
 import { ToastService } from '../../ui/toast.service';
 
@@ -97,7 +98,10 @@ function statusChip(schedule: MaintenanceScheduleDto | CalendarEventDto): { labe
           <button type="button" class="btn btn-secondary !px-2 !py-1 text-xs" (click)="reloadAssets()">Ανανέωση</button>
         </div>
         @if (loadErrorAssets()) {
-          <div class="border-red-200 bg-red-50 p-3 text-sm text-red-700">Αποτυχία φόρτωσης παγίων.</div>
+          <div class="border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            <p>Αποτυχία φόρτωσης παγίων.</p>
+            <button type="button" class="btn btn-secondary mt-2" (click)="reloadAssets()">Δοκιμή ξανά</button>
+          </div>
         }
         <table class="data-table">
           <thead>
@@ -116,7 +120,8 @@ function statusChip(schedule: MaintenanceScheduleDto | CalendarEventDto): { labe
                 <td class="text-xs">{{asset.location || '—'}}</td>
                 <td class="text-xs whitespace-nowrap">{{ asset.installedAt ? formatDate(asset.installedAt) : '—' }}</td>
                 <td class="whitespace-nowrap">
-                  <button type="button" class="btn btn-secondary !px-2 !py-1 text-xs" (click)="editAsset(asset)">Επεξ.</button>
+                  <button type="button" class="btn btn-secondary !px-2 !py-1 text-xs" (click)="openInspections(asset)">Ιστορικό</button>
+                  <button type="button" class="btn btn-secondary ml-1 !px-2 !py-1 text-xs" (click)="editAsset(asset)">Επεξ.</button>
                   <button type="button" class="btn btn-secondary ml-1 !px-2 !py-1 text-xs text-red-600" (click)="removeAsset(asset)">Διαγραφή</button>
                 </td>
               </tr>
@@ -134,7 +139,10 @@ function statusChip(schedule: MaintenanceScheduleDto | CalendarEventDto): { labe
           <button type="button" class="btn btn-secondary !px-2 !py-1 text-xs" (click)="reloadSchedules()">Ανανέωση</button>
         </div>
         @if (loadErrorSchedules()) {
-          <div class="border-red-200 bg-red-50 p-3 text-sm text-red-700">Αποτυχία φόρτωσης συντηρήσεων.</div>
+          <div class="border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            <p>Αποτυχία φόρτωσης συντηρήσεων.</p>
+            <button type="button" class="btn btn-secondary mt-2" (click)="reloadSchedules()">Δοκιμή ξανά</button>
+          </div>
         }
         <table class="data-table">
           <thead>
@@ -241,6 +249,11 @@ function statusChip(schedule: MaintenanceScheduleDto | CalendarEventDto): { labe
             <p class="text-sm text-slate-500">Καμία συντήρηση στον επιλεγμένο μήνα.</p>
           }
         </div>
+      } @else if (loadErrorCalendar()) {
+        <div class="m-4 border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          <p>Αποτυχία φόρτωσης ημερολογίου.</p>
+          <button type="button" class="btn btn-secondary mt-2" (click)="reloadCalendar()">Δοκιμή ξανά</button>
+        </div>
       } @else {
         <p class="p-6 text-center text-sm text-slate-500">Φόρτωση ημερολογίου...</p>
       }
@@ -336,12 +349,67 @@ function statusChip(schedule: MaintenanceScheduleDto | CalendarEventDto): { labe
           </form>
         </div>
       </div>
+    @if (selectedInspectionAsset(); as asset) {
+      <div class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" (click)="closeInspections()">
+        <div class="card max-h-[90vh] w-full max-w-2xl overflow-y-auto" (click)="$event.stopPropagation()">
+          <div class="mb-4 flex items-center justify-between">
+            <h2 class="card-title mb-0">Ιστορικό επιθεωρήσεων — {{ asset.name }}</h2>
+            <button type="button" class="btn btn-secondary !px-2 !py-1 text-xs" (click)="closeInspections()">×</button>
+          </div>
+          @if (inspectionLoading()) {
+            <p class="text-sm text-slate-500">Φόρτωση…</p>
+          } @else if (inspectionError()) {
+            <div class="border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              <p>Αποτυχία φόρτωσης ιστορικού.</p>
+              <button type="button" class="btn btn-secondary mt-2" (click)="loadInspections()">Δοκιμή ξανά</button>
+            </div>
+          } @else {
+            <table class="data-table">
+              <thead><tr><th>Ημερομηνία</th><th>Αποτέλεσμα</th><th>Επιθεωρητής</th><th>Σημειώσεις</th></tr></thead>
+              <tbody>
+                @for (record of inspectionRecords(); track record.id) {
+                  <tr>
+                    <td class="text-xs">{{ formatDateTime(record.inspectedAt) }}</td>
+                    <td><span class="badge" [class]="inspectionResultClass(record.result)">{{ inspectionResultLabel(record.result) }}</span></td>
+                    <td class="text-xs">{{ record.inspectorName ?? '—' }}</td>
+                    <td class="text-xs">{{ record.notes ?? '—' }}</td>
+                  </tr>
+                } @empty {
+                  <tr><td colspan="4" class="py-6 text-center text-sm text-slate-500">Δεν υπάρχουν επιθεωρήσεις.</td></tr>
+                }
+              </tbody>
+            </table>
+          }
+          <form [formGroup]="inspectionForm" (ngSubmit)="addInspection(asset)" class="mt-5 flex flex-col gap-3 border-t border-slate-200 pt-4">
+            <h3 class="text-sm font-semibold">Νέα επιθεώρηση</h3>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label class="label" for="inspectionResult">Αποτέλεσμα</label>
+                <select id="inspectionResult" class="input" formControlName="result">
+                  <option value="OK">OK</option>
+                  <option value="NG">NG</option>
+                  <option value="REPAIR_NEEDED">Χρειάζεται επισκευή</option>
+                </select>
+              </div>
+              <div>
+                <label class="label" for="inspectionNotes">Σημειώσεις</label>
+                <input id="inspectionNotes" class="input" formControlName="notes" />
+              </div>
+            </div>
+            <button type="submit" class="btn btn-primary self-start" [disabled]="savingInspection()">
+              {{ savingInspection() ? 'Καταχώρηση…' : 'Καταχώρηση επιθεώρησης' }}
+            </button>
+          </form>
+        </div>
+      </div>
+    }
     }
   `,
 })
 export class AdminMaintenancePage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
   private readonly maintenanceApi = inject(MaintenanceApiService);
+  private readonly inspectionsApi = inject(InspectionsApiService);
   private readonly categoriesApi = inject(CategoriesApiService);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
@@ -353,8 +421,14 @@ export class AdminMaintenancePage implements OnInit {
 
   protected readonly loadErrorAssets = signal(false);
   protected readonly loadErrorSchedules = signal(false);
+  protected readonly loadErrorCalendar = signal(false);
   protected readonly generating = signal(false);
   protected readonly generateResult = signal<GenerateJobsResultDto | null>(null);
+  protected readonly selectedInspectionAsset = signal<BuildingAssetDto | null>(null);
+  protected readonly inspectionRecords = signal<InspectionRecordDto[]>([]);
+  protected readonly inspectionLoading = signal(false);
+  protected readonly inspectionError = signal(false);
+  protected readonly savingInspection = signal(false);
 
   protected readonly showAssetModal = signal(false);
   protected readonly showScheduleModal = signal(false);
@@ -429,6 +503,11 @@ export class AdminMaintenancePage implements OnInit {
     notes: [''],
   });
 
+  protected readonly inspectionForm = this.fb.nonNullable.group({
+    result: this.fb.nonNullable.control<InspectionResult>('OK'),
+    notes: [''],
+  });
+
   protected readonly scheduleForm = this.fb.nonNullable.group({
     assetId: ['', Validators.required],
     title: ['', [Validators.required, Validators.minLength(2)]],
@@ -466,15 +545,34 @@ export class AdminMaintenancePage implements OnInit {
   }
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    this.loadErrorAssets.set(false);
+    this.loadErrorSchedules.set(false);
+    this.loadErrorCalendar.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadErrorAssets.set(true);
+          this.loadErrorSchedules.set(true);
+          this.loadErrorCalendar.set(true);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.categoriesApi
           .list(building.id)
-          .pipe(catchError(() => EMPTY))
-          .subscribe((cats) => this.expenseCategories.set(cats as any));
+          .pipe(
+            catchError(() => {
+              this.toast.error('Η φόρτωση κατηγοριών δαπάνης απέτυχε.');
+              return EMPTY;
+            }),
+          )
+          .subscribe((cats) => this.expenseCategories.set(cats as never));
         this.reloadAll();
       });
   }
@@ -503,13 +601,20 @@ export class AdminMaintenancePage implements OnInit {
 
   protected reloadCalendar(): void {
     if (!this.buildingId) return;
+    this.loadErrorCalendar.set(false);
     const base = new Date();
     base.setUTCMonth(base.getUTCMonth() + this.calendarOffset);
     const from = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), 1)).toISOString();
     const to = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0, 23, 59, 59, 999)).toISOString();
     this.maintenanceApi
       .getCalendar(this.buildingId, from, to)
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadErrorCalendar.set(true);
+          this.calendar.set(null);
+          return EMPTY;
+        }),
+      )
       .subscribe((cal) => this.calendar.set(cal));
   }
 
@@ -536,6 +641,88 @@ export class AdminMaintenancePage implements OnInit {
   protected closeAssetModal(): void {
     this.showAssetModal.set(false);
     this.editingAssetId.set(null);
+  }
+
+  protected openInspections(asset: BuildingAssetDto): void {
+    this.selectedInspectionAsset.set(asset);
+    this.inspectionRecords.set([]);
+    this.inspectionError.set(false);
+    this.inspectionForm.reset({ result: 'OK', notes: '' });
+    this.loadInspections();
+  }
+
+  protected closeInspections(): void {
+    this.selectedInspectionAsset.set(null);
+    this.inspectionRecords.set([]);
+    this.inspectionError.set(false);
+  }
+
+  protected loadInspections(): void {
+    const asset = this.selectedInspectionAsset();
+    if (!this.buildingId || !asset) return;
+    this.inspectionLoading.set(true);
+    this.inspectionError.set(false);
+    this.inspectionsApi
+      .list(this.buildingId, asset.id)
+      .pipe(
+        catchError(() => {
+          this.inspectionError.set(true);
+          this.inspectionLoading.set(false);
+          return EMPTY;
+        }),
+      )
+      .subscribe((records) => {
+        this.inspectionRecords.set(records);
+        this.inspectionLoading.set(false);
+      });
+  }
+
+  protected addInspection(asset: BuildingAssetDto): void {
+    if (!this.buildingId || this.savingInspection()) return;
+    const value = this.inspectionForm.getRawValue();
+    this.savingInspection.set(true);
+    this.inspectionsApi
+      .create(this.buildingId, asset.id, {
+        result: value.result,
+        ...(value.notes.trim() ? { notes: value.notes.trim() } : {}),
+      })
+      .subscribe({
+        next: () => {
+          this.savingInspection.set(false);
+          this.toast.success('Η επιθεώρηση καταχωρήθηκε.');
+          this.inspectionForm.reset({ result: 'OK', notes: '' });
+          this.loadInspections();
+          this.reloadSchedules();
+        },
+        error: () => {
+          this.savingInspection.set(false);
+          this.toast.error('Η καταχώρηση επιθεώρησης απέτυχε.');
+        },
+      });
+  }
+
+  protected inspectionResultLabel(result: InspectionResult): string {
+    switch (result) {
+      case 'OK':
+        return 'OK';
+      case 'NG':
+        return 'NG';
+      default:
+        return 'Χρειάζεται επισκευή';
+    }
+  }
+
+  protected inspectionResultClass(result: InspectionResult): string {
+    return result === 'OK'
+      ? 'bg-emerald-100 text-emerald-700'
+      : 'bg-red-100 text-red-700';
+  }
+
+  protected formatDateTime(iso: string): string {
+    return new Date(iso).toLocaleString('el-GR', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+    });
   }
 
   protected editAsset(asset: BuildingAssetDto): void {
@@ -584,11 +771,14 @@ export class AdminMaintenancePage implements OnInit {
   protected removeAsset(asset: BuildingAssetDto): void {
     if (!this.buildingId) return;
     if (!confirm(`Διαγραφή παγίου "${asset.name}";`)) return;
-    this.maintenanceApi.deleteAsset(this.buildingId, asset.id).pipe(catchError(() => EMPTY)).subscribe(() => {
-      this.toast.info(`Διαγράφηκε: ${asset.name}`);
-      this.reloadAssets();
-      this.reloadSchedules(); // schedules may be cascaded
-      this.reloadCalendar();
+    this.maintenanceApi.deleteAsset(this.buildingId, asset.id).subscribe({
+      next: () => {
+        this.toast.info(`Διαγράφηκε: ${asset.name}`);
+        this.reloadAssets();
+        this.reloadSchedules(); // schedules may be cascaded
+        this.reloadCalendar();
+      },
+      error: () => this.toast.error('Η διαγραφή παγίου απέτυχε.'),
     });
   }
 
@@ -654,10 +844,13 @@ export class AdminMaintenancePage implements OnInit {
   protected removeSchedule(sch: MaintenanceScheduleDto): void {
     if (!this.buildingId) return;
     if (!confirm(`Διαγραφή "${sch.title}";`)) return;
-    this.maintenanceApi.deleteSchedule(this.buildingId, sch.id).pipe(catchError(() => EMPTY)).subscribe(() => {
-      this.toast.info(`Διαγράφηκε: ${sch.title}`);
-      this.reloadSchedules();
-      this.reloadCalendar();
+    this.maintenanceApi.deleteSchedule(this.buildingId, sch.id).subscribe({
+      next: () => {
+        this.toast.info(`Διαγράφηκε: ${sch.title}`);
+        this.reloadSchedules();
+        this.reloadCalendar();
+      },
+      error: () => this.toast.error('Η διαγραφή συντήρησης απέτυχε.'),
     });
   }
 

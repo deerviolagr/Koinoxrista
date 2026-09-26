@@ -1,3 +1,5 @@
+import type { CurrencyCode } from './money';
+
 export type MyDataStatus = 'PENDING' | 'SUBMITTED' | 'ACCEPTED' | 'REJECTED';
 
 /** Body of `POST /mydata/generate`. */
@@ -21,5 +23,7 @@ export interface MyDataInvoiceDto {
   classificationType: string;
   netAmountCents: number;
   vatAmountCents: number;
+  /** Always EUR for the Greek AADE adapter; never inferred for other markets. */
+  currency: CurrencyCode;
   status: MyDataStatus;
 }

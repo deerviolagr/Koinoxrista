@@ -31,7 +31,7 @@ export class JobsController {
   constructor(private readonly jobsService: JobsService) {}
 
   @Post('buildings/:buildingId/jobs')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   createJob(
     @Param('buildingId') buildingId: string,
     @Body() dto: CreateJobDto,
@@ -41,7 +41,7 @@ export class JobsController {
   }
 
   @Post('buildings/:buildingId/defects')
-  @Roles(Role.RESIDENT, Role.ADMIN)
+  @Roles(Role.RESIDENT, Role.ADMIN, Role.BUILDING_OWNER)
   createDefect(
     @Param('buildingId') buildingId: string,
     @Body() dto: CreateDefectDto,
@@ -51,7 +51,7 @@ export class JobsController {
   }
 
   @Get('buildings/:buildingId/jobs')
-  @Roles(Role.ADMIN, Role.RESIDENT)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER, Role.RESIDENT)
   listForBuilding(
     @Param('buildingId') buildingId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -61,8 +61,8 @@ export class JobsController {
 
   @Get('jobs/marketplace')
   @Roles(Role.PROVIDER)
-  marketplace() {
-    return this.jobsService.marketplace();
+  marketplace(@CurrentUser() user: AuthenticatedUser) {
+    return this.jobsService.marketplace(user.id);
   }
 
   @Get('jobs/mine')
@@ -82,7 +82,7 @@ export class JobsController {
   }
 
   @Get('jobs/:jobId/bids')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   listBids(
     @Param('jobId') jobId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -91,7 +91,7 @@ export class JobsController {
   }
 
   @Post('bids/:bidId/accept')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   acceptBid(
     @Param('bidId') bidId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -100,7 +100,7 @@ export class JobsController {
   }
 
   @Post('bids/:bidId/reject')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   rejectBid(
     @Param('bidId') bidId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -127,7 +127,7 @@ export class JobsController {
   }
 
   @Post('jobs/:jobId/convert')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   convertToRfp(
     @Param('jobId') jobId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -136,7 +136,7 @@ export class JobsController {
   }
 
   @Post('jobs/:jobId/complete')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   completeJob(
     @Param('jobId') jobId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -145,7 +145,7 @@ export class JobsController {
   }
 
   @Post('jobs/:jobId/rating')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   rateAcceptedBid(
     @Param('jobId') jobId: string,
     @Body() dto: RateBidDto,

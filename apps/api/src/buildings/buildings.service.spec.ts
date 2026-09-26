@@ -17,6 +17,7 @@ function makePrisma() {
     building: {
       create: jest.fn().mockResolvedValue({ id: 'building-1', name: 'X' }),
       findUnique: jest.fn(),
+      update: jest.fn().mockResolvedValue({ id: 'building-1' }),
     },
     user: { update: jest.fn().mockResolvedValue({}) },
     $transaction: jest.fn(),
@@ -72,5 +73,41 @@ describe('BuildingsService', () => {
 
   it('refuses users without a building link', async () => {
     await expect(service.findMine(user())).rejects.toThrow(ForbiddenException);
+  });
+
+  it('validates the effective market/currency/provider tuple on update', async () => {
+    prisma.building.findUnique.mockResolvedValue({
+      market: 'GR',
+      currency: 'EUR',
+      pspProvider: 'viva',
+    });
+
+    await service.updateSettings(
+      'building-1',
+      { market: 'US', currency: 'USD', pspProvider: 'stripe' },
+      user({ buildingId: 'building-1' }),
+    );
+
+    expect(prisma.building.update).toHaveBeenCalledWith({
+      where: { id: 'building-1' },
+      data: { market: 'US', currency: 'USD', pspProvider: 'stripe' },
+    });
+  });
+
+  it('rejects a partial update that would leave an incompatible tuple', async () => {
+    prisma.building.findUnique.mockResolvedValue({
+      market: 'GR',
+      currency: 'EUR',
+      pspProvider: 'viva',
+    });
+
+    await expect(
+      service.updateSettings(
+        'building-1',
+        { currency: 'USD' },
+        user({ buildingId: 'building-1' }),
+      ),
+    ).rejects.toThrow(/not supported in market GR/);
+    expect(prisma.building.update).not.toHaveBeenCalled();
   });
 });

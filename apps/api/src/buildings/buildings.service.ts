@@ -1,9 +1,16 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+
+import {
+  DEFAULT_CURRENCY,
+  DEFAULT_MARKET,
+  validateMarketSettings,
+} from '@org/shared';
 
 import { AuthenticatedUser } from '../auth/auth.types';
 import { assertSameBuilding } from '../common/tenant';
@@ -49,6 +56,31 @@ export class BuildingsService {
     assertSameBuilding(user, buildingId);
     if (!user.buildingId) {
       throw new ForbiddenException('User is not linked to a building');
+    }
+
+    const current = await this.prisma.building.findUnique({
+      where: { id: buildingId },
+      select: { market: true, currency: true, pspProvider: true },
+    });
+    if (!current) {
+      throw new NotFoundException('Building not found');
+    }
+
+    // Validate the effective tuple, including values omitted from a partial
+    // PATCH.  This prevents a market change from leaving an incompatible
+    // currency/provider behind (and vice versa).
+    const effective = {
+      market: dto.market ?? current.market ?? DEFAULT_MARKET,
+      currency: dto.currency ?? current.currency ?? DEFAULT_CURRENCY,
+      pspProvider:
+        dto.pspProvider ?? current.pspProvider ?? 'viva',
+    };
+    try {
+      validateMarketSettings(effective);
+    } catch (error) {
+      throw new BadRequestException(
+        error instanceof Error ? error.message : 'Invalid market settings',
+      );
     }
 
     return this.prisma.building.update({

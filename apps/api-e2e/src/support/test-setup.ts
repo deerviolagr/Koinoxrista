@@ -1,8 +1,9 @@
 import axios from 'axios';
 
-module.exports = async function () {
-  // Configure axios for tests to use.
-  const host = process.env.HOST ?? 'localhost';
-  const port = process.env.PORT ?? '3000';
-  axios.defaults.baseURL = `http://${host}:${port}`;
+import { API_ORIGIN } from './config';
+
+module.exports = async function configureAxios() {
+  // Specs use explicit `/api/...` paths so the API contract remains obvious;
+  // the origin is centralized so CI never silently falls back to another port.
+  axios.defaults.baseURL = API_ORIGIN;
 };

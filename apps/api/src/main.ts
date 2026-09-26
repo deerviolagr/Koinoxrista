@@ -5,29 +5,36 @@ import * as Sentry from '@sentry/nestjs';
 import helmet from 'helmet';
 
 import { AppModule } from './app/app.module';
+import { corsOrigins, validateProductionConfig } from './auth/security-config';
+
+export {
+  assertProductionConfig,
+  corsOrigins,
+  getCorsOriginValues,
+  getTwoFactorSecret,
+  validateProductionConfig,
+  validateSecurityConfig,
+  validateStartupConfig,
+} from './auth/security-config';
 
 if (process.env.SENTRY_DSN) {
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
-    environment: process.env.SENTRY_ENVIRONMENT ?? process.env.NODE_ENV ?? 'development',
+    environment:
+      process.env.SENTRY_ENVIRONMENT ?? process.env.NODE_ENV ?? 'development',
     tracesSampleRate: 0.1,
   });
 }
 
-function corsOrigins(): string[] | boolean {
-  const raw = process.env.CORS_ORIGINS;
-  if (!raw) return process.env.NODE_ENV === 'production' ? false : true;
-  return raw.split(',').map((origin) => origin.trim());
-}
-
-async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+export async function bootstrap(): Promise<void> {
+  validateProductionConfig();
+  // rawBody is required by signature-verifying webhook providers; keeping it
+  // enabled globally does not alter JSON parsing for ordinary routes.
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   app.use(
     helmet({
       contentSecurityPolicy:
-        process.env.NODE_ENV === 'production'
-          ? undefined
-          : false,
+        process.env.NODE_ENV === 'production' ? undefined : false,
       crossOriginResourcePolicy: { policy: 'cross-origin' },
     }),
   );
@@ -58,4 +65,8 @@ async function bootstrap() {
   );
 }
 
-bootstrap();
+// Do not start a server when this module is imported by a unit test. The
+// webpack/node entry still executes this in development and production.
+if (process.env.NODE_ENV !== 'test' && !process.env.JEST_WORKER_ID) {
+  void bootstrap();
+}

@@ -17,6 +17,8 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { RequirePermission } from '../permissions/permissions.decorator';
+import { PermissionsGuard } from '../permissions/permissions.guard';
 import { AttendanceToggleDto } from './dto/attendance-toggle.dto';
 import { CreateAgendaItemDto } from './dto/create-agenda-item.dto';
 import { UpdateAgendaItemDto } from './dto/update-agenda-item.dto';
@@ -24,12 +26,12 @@ import { AssemblyService } from './assembly.service';
 
 @Controller()
 @UsePipes(new ValidationPipe({ whitelist: true }))
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
 export class AssemblyController {
   constructor(private readonly assemblyService: AssemblyService) {}
 
   @Get('votes/:voteId/agenda')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   agenda(
     @Param('voteId') voteId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -38,7 +40,8 @@ export class AssemblyController {
   }
 
   @Post('votes/:voteId/agenda')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
+  @RequirePermission('votes.manage')
   appendAgenda(
     @Param('voteId') voteId: string,
     @Body() dto: CreateAgendaItemDto,
@@ -48,7 +51,8 @@ export class AssemblyController {
   }
 
   @Patch('agenda/:id')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
+  @RequirePermission('votes.manage')
   updateAgenda(
     @Param('id') id: string,
     @Body() dto: UpdateAgendaItemDto,
@@ -58,7 +62,8 @@ export class AssemblyController {
   }
 
   @Delete('agenda/:id')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
+  @RequirePermission('votes.manage')
   removeAgenda(
     @Param('id') id: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -67,7 +72,7 @@ export class AssemblyController {
   }
 
   @Get('votes/:voteId/attendance')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   attendance(
     @Param('voteId') voteId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -76,7 +81,8 @@ export class AssemblyController {
   }
 
   @Post('votes/:voteId/attendance')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
+  @RequirePermission('votes.manage')
   toggleAttendance(
     @Param('voteId') voteId: string,
     @Body() dto: AttendanceToggleDto,

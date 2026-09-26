@@ -4,7 +4,8 @@ import { EMPTY, catchError } from 'rxjs';
 import type { ComplianceItemDto, ComplianceKind } from '@org/shared';
 import { BuildingsApiService } from '../../core/api/buildings-api.service';
 import { ComplianceApiService } from '../../core/api/compliance-api.service';
-import { eurosToCents, formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
+import { eurosToCents } from '../../ui/format';
 import { ToastService } from '../../ui/toast.service';
 
 const KIND_LABELS: Record<ComplianceKind, string> = {
@@ -62,7 +63,7 @@ interface StatusChip {
             <input id="policyNumber" type="text" class="input" formControlName="policyNumber" />
           </div>
           <div>
-            <label class="label" for="premium">Ασφάλιστρο € (προαιρετικό)</label>
+            <label class="label" for="premium">Ασφάλιστρο {{ currency() }} (προαιρετικό)</label>
             <input
               id="premium"
               type="number"
@@ -141,7 +142,8 @@ interface StatusChip {
         <div class="card overflow-x-auto p-0">
           @if (loadError()) {
             <div class="border-red-200 bg-red-50 p-4 text-sm text-red-700">
-              Αποτυχία φόρτωσης μητρώου συμμόρφωσης.
+              <p>Αποτυχία φόρτωσης μητρώου συμμόρφωσης.</p>
+              <button type="button" class="btn btn-secondary mt-3" (click)="loadBuilding()">Δοκιμή ξανά</button>
             </div>
           }
           <table class="data-table">
@@ -210,11 +212,13 @@ interface StatusChip {
 })
 export class AdminCompliancePage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly complianceApi = inject(ComplianceApiService);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
 
   protected readonly items = signal<ComplianceItemDto[]>([]);
   protected readonly submitted = signal(false);
@@ -246,9 +250,19 @@ export class AdminCompliancePage implements OnInit {
   private buildingId: string | null = null;
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    this.loadError.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.reload();
@@ -364,11 +378,13 @@ export class AdminCompliancePage implements OnInit {
   }
 
   protected remove(item: ComplianceItemDto): void {
-    this.complianceApi
-      .delete(item.id)
-      .pipe(catchError(() => EMPTY))
-      .subscribe(() => this.reload());
-    this.toast.info(`Διαγράφηκε: ${item.title}`);
+    this.complianceApi.delete(item.id).subscribe({
+      next: () => {
+        this.toast.info(`Διαγράφηκε: ${item.title}`);
+        this.reload();
+      },
+      error: () => this.toast.error('Η διαγραφή της καταχώρισης απέτυχε.'),
+    });
   }
 
   protected runCheck(): void {

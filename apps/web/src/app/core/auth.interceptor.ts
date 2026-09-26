@@ -9,6 +9,7 @@ import { throwError } from 'rxjs';
 import { catchError, switchMap } from 'rxjs/operators';
 import { environment } from '../../environments/environment';
 import { AuthService } from './auth.service';
+import { loginTreeFor } from './role.guard';
 
 /** Requests to auth endpoints must not be intercepted (no retry / redirect). */
 function isAuthRequest(url: string): boolean {
@@ -41,8 +42,10 @@ export const authInterceptor: HttpInterceptorFn = (req, next) => {
       return auth.refreshAccessToken().pipe(
         switchMap(() => next(withToken(req))),
         catchError(() => {
-          auth.logout();
-          router.navigateByUrl('/login');
+          const returnUrl = router.url;
+          auth.logout().subscribe(() => {
+            void router.navigateByUrl(loginTreeFor(router, returnUrl));
+          });
           return throwError(() => err);
         }),
       );

@@ -1,4 +1,7 @@
 /** Current schema version of the building transfer (backup) payload. */
+import type { CurrencyCode, MarketCode, PspProvider } from './market';
+import type { OccupantType } from './tenancy';
+
 export const BUILDING_TRANSFER_VERSION = 1;
 
 /** All `AllocationStrategy` enum values accepted in a transfer payload. */
@@ -24,6 +27,10 @@ export interface TransferBuildingDto {
   name: string;
   address: string;
   city: string;
+  market?: MarketCode;
+  currency?: CurrencyCode;
+  pspProvider?: PspProvider | null;
+  invoiceRegistrationNo?: string | null;
 }
 
 export interface TransferUnitDto {
@@ -40,6 +47,11 @@ export interface TransferOwnershipDto {
   unitLabel: string;
   email: string;
   shareMillimes: number;
+  occupantType?: OccupantType;
+  votingEligible?: boolean;
+  residentRole?: string | null;
+  periodStart?: string | null;
+  periodEnd?: string | null;
 }
 
 export interface TransferCategoryDto {

@@ -17,7 +17,8 @@ import {
   lateFeeModeLabel,
 } from '../../core/api/late-fees-api.service';
 import { ToastService } from '../../ui/toast.service';
-import { eurosToCents, formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
+import { eurosToCents } from '../../ui/format';
 
 @Component({
   selector: 'app-admin-late-fees',
@@ -63,7 +64,7 @@ import { eurosToCents, formatEuros } from '../../ui/format';
             </div>
             @if (form.controls.mode.value === 'FLAT') {
               <div>
-                <label class="label" for="dailyFlatEuros">Ποσό ανά ημέρα (€)</label>
+                <label class="label" for="dailyFlatEuros">Ποσό ανά ημέρα ({{ currency() }})</label>
                 <input
                   id="dailyFlatEuros"
                   type="number"
@@ -90,7 +91,7 @@ import { eurosToCents, formatEuros } from '../../ui/format';
               </div>
             }
             <div>
-              <label class="label" for="capEuros">Ανώτατο όριο προστίμου (€, προαιρετικό)</label>
+              <label class="label" for="capEuros">Ανώτατο όριο προστίμου ({{ currency() }}, προαιρετικό)</label>
               <input
                 id="capEuros"
                 type="number"
@@ -189,11 +190,13 @@ import { eurosToCents, formatEuros } from '../../ui/format';
 })
 export class AdminLateFeesPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly lateFeesApi = inject(LateFeesApiService);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
   protected readonly modeLabel = lateFeeModeLabel;
 
   protected readonly charges = signal<LateFeeChargeDto[]>([]);
@@ -277,7 +280,7 @@ export class AdminLateFeesPage implements OnInit {
         next: (result) => {
           this.runResult.set(result);
           this.toast.success(
-            `Επιβλήθηκαν ${result.charged} πρόστιμα (${formatEuros(result.totalCents)}).`,
+            `Επιβλήθηκαν ${result.charged} πρόστιμα (${this.euros(result.totalCents)}).`,
           );
           this.running.set(false);
           this.reloadCharges();

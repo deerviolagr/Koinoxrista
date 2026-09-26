@@ -1,4 +1,10 @@
 /** Role / strategy / status unions mirroring the Prisma enums. */
+import type { CurrencyCode } from './money';
+import type {
+  CreateOwnershipDto as OwnershipCreateDto,
+  Ownership as OwnershipRecord,
+} from './ownership';
+
 export type Role =
   | 'ADMIN'
   | 'RESIDENT'
@@ -15,7 +21,8 @@ export type AllocationStrategy =
   | 'ELEVATOR_FLOORS'
   | 'SQUARE_METERS'
   | 'SHARE_FRACTION'
-  | 'HEADCOUNT';
+  | 'HEADCOUNT'
+  | 'METERS';
 
 export type PaymentStatus = 'PENDING' | 'PAID' | 'FAILED' | 'REFUNDED';
 
@@ -43,19 +50,10 @@ export interface CreateUnitDto {
   shareFraction?: number;
 }
 
-export interface Ownership {
-  id: string;
-  unitId: string;
-  userId: string;
-  shareMillimes: number;
-  periodStart?: string | null;
-}
-
-export interface CreateOwnershipDto {
-  userId: string;
-  shareMillimes: number;
-  periodStart?: string;
-}
+/** Canonical ownership contract (including tenancy/occupancy fields). */
+export type Ownership = OwnershipRecord;
+export type CreateOwnershipDto = OwnershipCreateDto;
+export type { OccupancyView } from './ownership';
 
 export interface ExpenseCategory {
   id: string;
@@ -74,6 +72,7 @@ export interface Share {
   expenseId: string;
   unitId: string;
   amountCents: number;
+  currency?: CurrencyCode;
 }
 
 export interface Expense {
@@ -86,6 +85,7 @@ export interface Expense {
   createdById: string;
   createdAt?: string;
   shares?: Share[];
+  currency?: CurrencyCode;
 }
 
 export interface CreateExpenseDto {
@@ -103,6 +103,7 @@ export interface Invoice {
   totalCents: number;
   paidCents: number;
   status: PaymentStatus;
+  currency?: CurrencyCode;
 }
 
 export interface RunInvoicesDto {

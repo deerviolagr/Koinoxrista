@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { SupplierPaymentMethod, type Prisma } from '@prisma/client';
 import type { MyPayoutDto, PayoutSummaryDto } from '@org/shared';
 
@@ -73,14 +73,16 @@ export class PayoutsService {
     user: AuthenticatedUser,
   ) {
     assertSameBuilding(user, buildingId);
+    this.assertValidPaymentInput(dto.amountCents, dto.paidAt);
     await this.assertLinkedEntity(buildingId, dto.jobId, dto.expenseId);
 
+    const paidAt = new Date(dto.paidAt);
     const payment = await this.prisma.supplierPayment.create({
       data: {
         buildingId,
         amountCents: dto.amountCents,
         method: dto.method,
-        paidAt: new Date(dto.paidAt),
+        paidAt,
         ...(dto.jobId !== undefined ? { jobId: dto.jobId } : {}),
         ...(dto.expenseId !== undefined ? { expenseId: dto.expenseId } : {}),
         ...(dto.reference !== undefined && dto.reference !== ''
@@ -116,7 +118,13 @@ export class PayoutsService {
     assertSameBuilding(user, buildingId);
     const existing = await this.findOwned(buildingId, id);
 
-    if (dto.jobId || dto.expenseId) {
+    if (dto.amountCents !== undefined || dto.paidAt !== undefined) {
+      this.assertValidPaymentInput(
+        dto.amountCents ?? existing.amountCents,
+        dto.paidAt ?? existing.paidAt.toISOString(),
+      );
+    }
+    if (dto.jobId !== undefined || dto.expenseId !== undefined) {
       await this.assertLinkedEntity(buildingId, dto.jobId, dto.expenseId);
     }
 
@@ -232,6 +240,16 @@ export class PayoutsService {
       paidAt: payment.paidAt.toISOString(),
       reference: payment.reference,
     }));
+  }
+
+  private assertValidPaymentInput(amountCents: number, paidAt: string | Date): void {
+    if (!Number.isInteger(amountCents) || amountCents <= 0) {
+      throw new BadRequestException('amountCents must be a positive integer');
+    }
+    const date = paidAt instanceof Date ? paidAt : new Date(paidAt);
+    if (Number.isNaN(date.getTime())) {
+      throw new BadRequestException('paidAt must be a valid date');
+    }
   }
 
   private findOwned(buildingId: string, id: string) {

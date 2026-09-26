@@ -164,10 +164,10 @@ describe('AuthService', () => {
 
     const makeTx = () => ({
       user: { create: jest.fn() },
-      unit: { findUniqueOrThrow: jest.fn() },
+      unit: { findFirst: jest.fn() },
       ownership: { create: jest.fn() },
       membership: { create: jest.fn() },
-      invite: { update: jest.fn() },
+      invite: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
     });
 
     const runTransactionWith = (tx: ReturnType<typeof makeTx>) => {
@@ -219,7 +219,7 @@ describe('AuthService', () => {
       const invite = makeInvite();
       prisma.invite.findUnique.mockResolvedValue(invite);
       const tx = runTransactionWith(makeTx());
-      tx.unit.findUniqueOrThrow.mockResolvedValue({
+      tx.unit.findFirst.mockResolvedValue({
         id: 'unit-1',
         millimes: 125,
       });
@@ -241,9 +241,20 @@ describe('AuthService', () => {
           periodStart: expect.any(Date),
         }),
       });
-      expect(tx.membership.create).not.toHaveBeenCalled();
-      expect(tx.invite.update).toHaveBeenCalledWith({
-        where: { id: 'invite-1' },
+      expect(tx.membership.create).toHaveBeenCalledWith({
+        data: {
+          userId: 'user-new',
+          buildingId: 'building-1',
+          role: Role.RESIDENT,
+          isDefault: true,
+        },
+      });
+      expect(tx.invite.updateMany).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          id: 'invite-1',
+          acceptedAt: null,
+          expiresAt: { gt: expect.any(Date) },
+        }),
         data: { acceptedAt: expect.any(Date) },
       });
     });
@@ -268,8 +279,8 @@ describe('AuthService', () => {
         },
       });
       expect(tx.ownership.create).not.toHaveBeenCalled();
-      expect(tx.unit.findUniqueOrThrow).not.toHaveBeenCalled();
-      expect(tx.invite.update).toHaveBeenCalledTimes(1);
+      expect(tx.unit.findFirst).not.toHaveBeenCalled();
+      expect(tx.invite.updateMany).toHaveBeenCalledTimes(1);
     });
 
     it('still maps duplicate-email P2002 to 409 during invited signup', async () => {
@@ -287,7 +298,7 @@ describe('AuthService', () => {
         status: 409,
         message: 'Email already registered',
       });
-      expect(tx.invite.update).not.toHaveBeenCalled();
+      expect(tx.invite.updateMany).toHaveBeenCalledTimes(1);
     });
 
     it('generates tokens that hash to their stored form (token scheme sanity)', () => {
@@ -548,7 +559,7 @@ describe('AuthService', () => {
         userAgent: 'TestBrowser',
       });
 
-      expect(sessions.assertNotRevoked).toHaveBeenCalledWith(previous);
+      expect(sessions.assertNotRevoked).toHaveBeenCalledWith(previous, userId);
       expect(sessions.rotate).toHaveBeenCalledWith(
         userId,
         previous,

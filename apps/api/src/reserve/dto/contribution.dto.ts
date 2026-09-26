@@ -20,4 +20,9 @@ export class ContributionDto {
   @IsOptional()
   @IsString()
   levyId?: string;
+
+  /** Optional unit to which a LEVY collection must be allocated. */
+  @IsOptional()
+  @IsString()
+  unitId?: string;
 }

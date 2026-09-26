@@ -19,7 +19,8 @@ import { CategoriesApiService } from '../../core/api/categories-api.service';
 import { ExpensesApiService } from '../../core/api/expenses-api.service';
 import { UnitsApiService } from '../../core/api/units-api.service';
 import { ToastService } from '../../ui/toast.service';
-import { eurosToCents, formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
+import { eurosToCents } from '../../ui/format';
 
 @Component({
   selector: 'app-admin-expenses',
@@ -52,7 +53,7 @@ import { eurosToCents, formatEuros } from '../../ui/format';
             }
           </div>
           <div>
-            <label class="label" for="amount">Ποσό (€)</label>
+            <label class="label" for="amount">Ποσό ({{ currency() }})</label>
             <input
               id="amount"
               type="number"
@@ -91,9 +92,12 @@ import { eurosToCents, formatEuros } from '../../ui/format';
           </div>
         </div>
 
-        @if (loadError()) {
+        @if (loading()) {
+          <div class="card mb-4 text-sm text-slate-500">Φόρτωση…</div>
+        } @else if (loadError()) {
           <div class="card mb-4 border-red-200 bg-red-50 text-sm text-red-700">
-            Αποτυχία φόρτωσης εξόδων.
+            <p>Αποτυχία φόρτωσης εξόδων.</p>
+            <button type="button" class="btn btn-secondary mt-3" (click)="loadBuilding()">Δοκιμή ξανά</button>
           </div>
         }
 
@@ -162,6 +166,7 @@ import { eurosToCents, formatEuros } from '../../ui/format';
 })
 export class AdminExpensesPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly unitsApi = inject(UnitsApiService);
   private readonly categoriesApi = inject(CategoriesApiService);
   private readonly expensesApi = inject(ExpensesApiService);
@@ -169,7 +174,8 @@ export class AdminExpensesPage implements OnInit {
   private readonly fb = inject(FormBuilder);
 
   protected readonly isValidPeriod = isValidPeriod;
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
 
   protected readonly categories = signal<ExpenseCategory[]>([]);
   protected readonly expenses = signal<Expense[]>([]);
@@ -177,6 +183,7 @@ export class AdminExpensesPage implements OnInit {
   protected readonly expanded = signal<string | null>(null);
   protected readonly submitted = signal(false);
   protected readonly saving = signal(false);
+  protected readonly loading = signal(true);
   protected readonly loadError = signal(false);
 
   protected readonly periodCtrl = this.fb.nonNullable.control(
@@ -213,16 +220,34 @@ export class AdminExpensesPage implements OnInit {
   }
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    this.loading.set(true);
+    this.loadError.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.loadError.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         forkJoin({
           units: this.unitsApi.list(building.id),
           categories: this.categoriesApi.list(building.id),
         })
-          .pipe(catchError(() => EMPTY))
+          .pipe(
+            catchError(() => {
+              this.loadError.set(true);
+              this.loading.set(false);
+              return EMPTY;
+            }),
+          )
           .subscribe(({ units, categories }) => {
             const labels: Record<string, string> = {};
             for (const unit of units) labels[unit.id] = unit.label;
@@ -282,6 +307,7 @@ export class AdminExpensesPage implements OnInit {
 
   private loadExpenses(period: string): void {
     if (!this.buildingId || !isValidPeriod(period)) return;
+    this.loading.set(true);
     this.loadError.set(false);
     this.expanded.set(null);
     this.expensesApi
@@ -289,9 +315,13 @@ export class AdminExpensesPage implements OnInit {
       .pipe(
         catchError(() => {
           this.loadError.set(true);
+          this.loading.set(false);
           return EMPTY;
         }),
       )
-      .subscribe((expenses) => this.expenses.set(expenses));
+      .subscribe((expenses) => {
+        this.expenses.set(expenses);
+        this.loading.set(false);
+      });
   }
 }

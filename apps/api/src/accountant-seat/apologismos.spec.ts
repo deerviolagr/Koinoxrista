@@ -129,4 +129,50 @@ describe('buildApologismos', () => {
 
     expect(dto.totals.surplusDeficitCents).toBe(40_000);
   });
+
+  it('separates billed expenses from supplier cash cost', () => {
+    const dto = buildApologismos({
+      ...base,
+      expenseGroups: [{ categoryId: 'cat-1', _sum: { totalCents: 120_000 } }],
+      budgetRows: [
+        { categoryId: 'cat-1', categoryName: 'Maintenance', plannedCents: 100_000 },
+      ],
+      supplierPayments: [
+        { amountCents: 80_000, expense: { categoryId: 'cat-1' } },
+      ],
+      invoices: [
+        { periodYearMonth: '2025-03', totalCents: 100_000, paidCents: 100_000 },
+      ],
+      unitBalances: [],
+    });
+
+    expect(dto.incomeByCategory[0].chargedCents).toBe(120_000);
+    expect(dto.costsByCategory[0].actualCents).toBe(80_000);
+    expect(dto.totals.surplusDeficitCents).toBe(20_000);
+  });
+
+  it('carries unpaid prior-year invoices into year-end arrears and unit balances', () => {
+    const dto = buildApologismos({
+      ...base,
+      expenseGroups: [],
+      budgetRows: [],
+      invoices: [
+        { periodYearMonth: '2024-12', totalCents: 40_000, paidCents: 10_000 },
+        { periodYearMonth: '2025-01', totalCents: 20_000, paidCents: 20_000 },
+      ],
+      unitBalances: [
+        {
+          unitId: 'unit-1',
+          unitLabel: 'A',
+          invoicedCents: 20_000,
+          paidCents: 20_000,
+          balanceCents: 0,
+        },
+      ],
+      priorYearArrearsByUnit: { 'unit-1': 30_000 },
+    });
+
+    expect(dto.totals.arrearsCents).toBe(30_000);
+    expect(dto.unitBalances[0].balanceCents).toBe(30_000);
+  });
 });

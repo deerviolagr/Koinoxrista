@@ -14,7 +14,7 @@ import type {
 } from '@org/shared';
 import { BankImportApiService } from '../../core/api/bank-import-api.service';
 import { BuildingsApiService } from '../../core/api/buildings-api.service';
-import { formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 
 type Confidence = 'high' | 'medium' | 'low';
 
@@ -62,11 +62,14 @@ export function confidenceCls(confidence: Confidence): string {
         (ngModelChange)="csv.set($event)"
       ></textarea>
       <div class="flex items-center justify-end gap-2">
+        @if (buildingLoading()) {
+          <span class="text-sm text-slate-500">Φόρτωση κτιρίου…</span>
+        }
         <button
           type="button"
           class="btn btn-primary"
           (click)="runPreview()"
-          [disabled]="busy() || csv().trim().length === 0"
+          [disabled]="buildingLoading() || busy() || csv().trim().length === 0"
         >
           Προεπισκόπηση
         </button>
@@ -81,7 +84,10 @@ export function confidenceCls(confidence: Confidence): string {
 
     @if (error()) {
       <div class="card mb-6 border-red-200 bg-red-50 text-sm text-red-700">
-        Αποτυχία επεξεργασίας του CSV. Δοκιμάστε ξανά.
+        <p>Αποτυχία επεξεργασίας του CSV.</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="loadBuilding()">
+          Δοκιμή ξανά
+        </button>
       </div>
     }
 
@@ -171,13 +177,16 @@ export function confidenceCls(confidence: Confidence): string {
 export class AdminBankImportPage implements OnInit {
   private readonly bankImportApi = inject(BankImportApiService);
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
   protected readonly confidenceLabel = confidenceLabel;
   protected readonly confidenceCls = confidenceCls;
 
   protected readonly csv = signal('');
   protected readonly busy = signal(false);
+  protected readonly buildingLoading = signal(true);
   protected readonly error = signal(false);
   protected readonly message = signal<string | null>(null);
   protected readonly preview = signal<BankImportPreviewResponse | null>(null);
@@ -202,16 +211,25 @@ export class AdminBankImportPage implements OnInit {
   });
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    if (this.busy()) return;
+    this.buildingLoading.set(true);
+    this.error.set(false);
     this.buildingsApi
       .mine()
       .pipe(
         catchError(() => {
           this.error.set(true);
+          this.buildingLoading.set(false);
           return EMPTY;
         }),
       )
       .subscribe((building) => {
         this.buildingId = building.id;
+        this.buildingLoading.set(false);
       });
   }
 
@@ -298,13 +316,22 @@ export class AdminBankImportPage implements OnInit {
           return EMPTY;
         }),
       )
-      .subscribe(({ applied, skipped }) => {
-        this.message.set(
-          skipped > 0
-            ? `Καταχωρήθηκαν ${applied} πληρωμές, παραλείφθηκαν ${skipped}.`
-            : `Καταχωρήθηκαν ${applied} πληρωμές.`,
-        );
-        this.doPreview(this.csv());
+      .subscribe({
+        next: ({ applied, skipped }) => {
+          this.message.set(
+            skipped > 0
+              ? `Καταχωρήθηκαν ${applied} πληρωμές, παραλείφθηκαν ${skipped}.`
+              : `Καταχωρήθηκαν ${applied} πληρωμές.`,
+          );
+          // Release the request lock before refreshing the preview. Otherwise
+          // doPreview() returns immediately and the old matches remain shown.
+          this.busy.set(false);
+          this.doPreview(this.csv());
+        },
+        error: () => {
+          this.error.set(true);
+          this.busy.set(false);
+        },
       });
   }
 }

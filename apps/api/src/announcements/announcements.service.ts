@@ -8,7 +8,12 @@ import { Prisma, Role } from '@prisma/client';
 
 import { AuditService } from '../audit/audit.service';
 import type { AuthenticatedUser } from '../auth/auth.types';
-import { assertSameBuilding } from '../common/tenant';
+import {
+  assertSameBuilding,
+  effectiveBuildingRole,
+  isAdminLikeRole,
+  membershipUserIds,
+} from '../common/tenant';
 import type { SmsContext } from '../notifications/sms-templates';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -95,15 +100,20 @@ export class AnnouncementsService {
       metadata: { title: created.title, pinned: created.pinned },
     });
 
-    // Fire-and-forget: a slow/broken notification path must never block or
-    // fail the announcement itself.
-    void this.notifyAudience(buildingId, created.audience, {
-      type: ANNOUNCEMENT_CREATED_TYPE,
-      title: `Νέα ανακοίνωση: ${created.title}`,
-      body: excerpt(created.body),
-      linkPath: ANNOUNCEMENT_FEED_LINK_PATH,
-      sms: { kind: 'announcement', topic: created.title },
-    });
+    // Notification delivery is best-effort: a slow/broken path must never
+    // roll back the announcement, but awaiting the fan-out makes membership
+    // delivery deterministic for API clients and tests.
+    try {
+      await this.notifyAudience(buildingId, created.audience, {
+        type: ANNOUNCEMENT_CREATED_TYPE,
+        title: `Νέα ανακοίνωση: ${created.title}`,
+        body: excerpt(created.body),
+        linkPath: ANNOUNCEMENT_FEED_LINK_PATH,
+        sms: { kind: 'announcement', topic: created.title },
+      });
+    } catch {
+      // Best-effort side effect.
+    }
 
     this.realtime.publishToBuilding(buildingId, 'announcement.created', {
       id: created.id,
@@ -129,7 +139,8 @@ export class AnnouncementsService {
   /** RESIDENT/ADMIN newsfeed: pinned first, then newest (see ANNOUNCEMENT_ORDER). */
   async feed(buildingId: string, user: AuthenticatedUser) {
     assertSameBuilding(user, buildingId);
-    const residentOnly = user.role !== Role.RESIDENT && user.role !== Role.ADMIN;
+    const role = await this.effectiveRoleFor(buildingId, user);
+    const residentOnly = !isAdminLikeRole(role) && role !== Role.RESIDENT;
     const items = await this.prisma.announcement.findMany({
       where: {
         buildingId,
@@ -242,13 +253,14 @@ export class AnnouncementsService {
     if (!comment) {
       throw new NotFoundException('Comment not found');
     }
-    if (user.role !== Role.ADMIN && comment.authorId !== user.id) {
+    const role = await this.effectiveRoleFor(announcement.buildingId, user);
+    if (!isAdminLikeRole(role) && comment.authorId !== user.id) {
       throw new ForbiddenException('You can only delete your own comments');
     }
 
     await this.prisma.announcementComment.delete({ where: { id: comment.id } });
 
-    if (user.role === Role.ADMIN && comment.authorId !== user.id) {
+    if (isAdminLikeRole(role) && comment.authorId !== user.id) {
       this.audit.record({
         buildingId: announcement.buildingId,
         actorId: user.id,
@@ -310,12 +322,20 @@ export class AnnouncementsService {
     }
     const announcement = await this.prisma.announcement.findUnique({
       where: { id: announcementId },
-      select: { id: true, buildingId: true },
+      select: { id: true, buildingId: true, audience: true },
     });
     if (!announcement) {
       throw new NotFoundException('Announcement not found');
     }
     assertSameBuilding(user, announcement.buildingId);
+    const role = await this.effectiveRoleFor(announcement.buildingId, user);
+    if (
+      announcement.audience === 'RESIDENTS' &&
+      !isAdminLikeRole(role) &&
+      role !== Role.RESIDENT
+    ) {
+      throw new ForbiddenException('Announcement is not available to this audience');
+    }
     return announcement;
   }
 
@@ -334,17 +354,45 @@ export class AnnouncementsService {
       sms?: SmsContext;
     },
   ): Promise<void> {
+    const membership = (this.prisma as unknown as { membership?: unknown })
+      .membership;
+    // ALL means every building member, including owners/admins.  RESIDENTS is
+    // the resident-facing slice plus the governance team that must be able to
+    // moderate/see the announcement.  Membership is authoritative; the User
+    // fallback keeps legacy rows working.
     const roles: Role[] =
       audience === 'RESIDENTS'
-        ? [Role.RESIDENT]
-        : [Role.RESIDENT, Role.PROVIDER, Role.ACCOUNTANT];
-    const users = await this.prisma.user.findMany({
-      where: { buildingId, role: { in: roles } },
-      select: { id: true },
-    });
-    await this.notifications.createForUsers(
-      users.map((user) => user.id),
-      notification,
-    );
+        ? [Role.RESIDENT, Role.ADMIN, Role.BUILDING_OWNER]
+        : [
+            Role.RESIDENT,
+            Role.PROVIDER,
+            Role.ACCOUNTANT,
+            Role.ADMIN,
+            Role.BUILDING_OWNER,
+          ];
+    const recipients = membership
+      ? await membershipUserIds(this.prisma, buildingId, roles)
+      : await this.prisma.user.findMany({
+          where: {
+            buildingId,
+            role: {
+              in:
+                audience === 'RESIDENTS'
+                  ? [Role.RESIDENT]
+                  : [Role.RESIDENT, Role.PROVIDER, Role.ACCOUNTANT],
+            },
+          },
+          select: { id: true },
+        }).then((users) => users.map((user) => user.id));
+    if (recipients.length > 0) {
+      await this.notifications.createForUsers(recipients, notification);
+    }
+  }
+
+  private async effectiveRoleFor(
+    buildingId: string,
+    user: AuthenticatedUser,
+  ): Promise<Role> {
+    return (await effectiveBuildingRole(this.prisma, user, buildingId)) ?? user.role;
   }
 }

@@ -14,7 +14,7 @@ import {
   ReportSummary,
   ReportsApiService,
 } from '../../core/api/reports-api.service';
-import { formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 import { BarChartComponent } from '../../ui/charts/bar-chart.component';
 import { pctOfMax } from '../../ui/charts/chart-utils';
 
@@ -58,7 +58,8 @@ interface CategoryRow extends ReportCategoryTotal {
       </div>
     } @else if (error()) {
       <div class="card border-red-200 bg-red-50 text-sm text-red-700">
-        Αποτυχία φόρτωσης στατιστικών. Δοκιμάστε ξανά.
+        <p>Αποτυχία φόρτωσης στατιστικών.</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="retry()">Δοκιμή ξανά</button>
       </div>
     } @else if (summary(); as data) {
       <div class="mb-6 grid gap-4 sm:grid-cols-3">
@@ -139,9 +140,11 @@ interface CategoryRow extends ReportCategoryTotal {
 })
 export class AdminAnalyticsPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly reportsApi = inject(ReportsApiService);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
 
   protected readonly monthOptions = [6, 12, 18, 24] as const;
   protected readonly months = signal<number>(12);
@@ -185,9 +188,25 @@ export class AdminAnalyticsPage implements OnInit {
   });
 
   ngOnInit(): void {
+    this.loadBuilding();
+  }
+
+  protected retry(): void {
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    this.loading.set(true);
+    this.error.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.error.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.loadSummary();

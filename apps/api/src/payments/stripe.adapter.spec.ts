@@ -12,10 +12,17 @@ function makeStripe(): StripeLike {
     },
     webhooks: {
       constructEvent: jest.fn().mockReturnValue({
-        object: 'checkout.session.completed',
+        id: 'evt_test_123',
+        type: 'checkout.session.completed',
+        object: 'event',
         data: {
           object: {
+            object: 'checkout.session',
             id: 'cs_test_123',
+            payment_intent: 'pi_test_123',
+            amount_total: 12_345,
+            currency: 'usd',
+            payment_status: 'paid',
             metadata: { invoiceRef: 'invoice-1' },
           },
         },
@@ -89,11 +96,16 @@ describe('RealStripeAdapter (P0-2 market-aware)', () => {
     const claim = await adapter.verifyWebhook('payload', 'signature');
 
     expect(claim).toEqual({
+      eventId: 'evt_test_123',
+      type: 'checkout.session.completed',
       object: 'checkout.session.completed',
-      // data.object.id is the checkout session id, exposed as the ref we use
-      // for the orderCode lookup (same convention as the JP adapter).
-      paymentIntent: { id: 'cs_test_123' },
+      objectType: 'checkout.session',
+      sessionRef: 'cs_test_123',
+      paymentRef: 'pi_test_123',
+      amountCents: 12_345,
+      currency: 'USD',
       invoiceRef: 'invoice-1',
+      paymentIntent: { id: 'cs_test_123' },
     });
     expect(stripe.webhooks.constructEvent).toHaveBeenCalledWith(
       'payload',

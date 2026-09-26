@@ -15,18 +15,21 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../auth/auth.types';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { RequirePermission } from '../permissions/permissions.decorator';
+import { PermissionsGuard } from '../permissions/permissions.guard';
 import { CastBallotDto } from './dto/cast-ballot.dto';
 import { CreateVoteDto } from './dto/create-vote.dto';
 import { VotesService } from './votes.service';
 
 @Controller()
 @UsePipes(new ValidationPipe({ whitelist: true }))
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
 export class VotesController {
   constructor(private readonly votesService: VotesService) {}
 
   @Post('buildings/:buildingId/votes')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
+  @RequirePermission('votes.manage')
   create(
     @Param('buildingId') buildingId: string,
     @Body() dto: CreateVoteDto,
@@ -36,7 +39,7 @@ export class VotesController {
   }
 
   @Get('buildings/:buildingId/votes')
-  @Roles(Role.ADMIN, Role.RESIDENT)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER, Role.RESIDENT)
   list(
     @Param('buildingId') buildingId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -45,7 +48,7 @@ export class VotesController {
   }
 
   @Get('votes/:voteId')
-  @Roles(Role.ADMIN, Role.RESIDENT)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER, Role.RESIDENT)
   get(
     @Param('voteId') voteId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -64,7 +67,8 @@ export class VotesController {
   }
 
   @Post('votes/:voteId/close')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
+  @RequirePermission('votes.manage')
   close(
     @Param('voteId') voteId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -73,7 +77,7 @@ export class VotesController {
   }
 
   @Get('votes/:voteId/ballots')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.BUILDING_OWNER)
   ballots(
     @Param('voteId') voteId: string,
     @CurrentUser() user: AuthenticatedUser,

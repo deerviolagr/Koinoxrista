@@ -145,10 +145,12 @@ export class GdprService {
     await this.prisma.$transaction(async (tx) => {
       const user = await tx.user.findUniqueOrThrow({
         where: { id: userId },
-        select: { email: true },
+        select: { email: true, buildingId: true },
       });
 
       // Rows are never deleted — FKs from invoices/bids/workLogs stay intact.
+      // Disable the account and clear its active-building pointer in the same
+      // transaction so no access token can continue to select a tenant.
       await tx.user.update({
         where: { id: userId },
         data: {
@@ -157,14 +159,80 @@ export class GdprService {
           lastName: ERASED_NAME,
           phone: null,
           passwordHash: randomPasswordHash(),
+          status: 'DISABLED',
+          buildingId: null,
+          twoFactorSecret: null,
+          twoFactorEnabled: false,
         },
       });
       await tx.membership.deleteMany({ where: { userId } });
-      await tx.apiKey.deleteMany({ where: { userId } });
+
+      // Keep credential rows for auditability, but make them unusable. The
+      // fallback delegates are only for older generated clients used by unit
+      // tests; the current Prisma schema takes the update path.
+      const refreshSessions = (
+        tx as unknown as {
+          refreshSession?: {
+            updateMany?: (args: unknown) => Promise<unknown>;
+            deleteMany?: (args: unknown) => Promise<unknown>;
+          };
+        }
+      ).refreshSession;
+      if (refreshSessions?.updateMany) {
+        await refreshSessions.updateMany({
+          where: { userId, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      } else {
+        await refreshSessions?.deleteMany?.({ where: { userId } });
+      }
+
+      const apiKeys = (
+        tx as unknown as {
+          apiKey?: {
+            updateMany?: (args: unknown) => Promise<unknown>;
+            deleteMany?: (args: unknown) => Promise<unknown>;
+          };
+        }
+      ).apiKey;
+      if (apiKeys?.updateMany) {
+        await apiKeys.updateMany({
+          where: { userId, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      } else {
+        await apiKeys?.deleteMany?.({ where: { userId } });
+      }
+
       await tx.providerProfile.deleteMany({ where: { userId } });
+      const recoveryCodes = (
+        tx as unknown as {
+          twoFactorRecoveryCode?: {
+            deleteMany?: (args: unknown) => Promise<unknown>;
+          };
+        }
+      ).twoFactorRecoveryCode;
+      await recoveryCodes?.deleteMany?.({ where: { userId } });
+      const pushSubscriptions = (
+        tx as unknown as {
+          pushSubscription?: {
+            deleteMany?: (args: unknown) => Promise<unknown>;
+          };
+        }
+      ).pushSubscription;
+      await pushSubscriptions?.deleteMany?.({ where: { userId } });
+      const emailVerifications = (
+        tx as unknown as {
+          emailVerification?: {
+            deleteMany?: (args: unknown) => Promise<unknown>;
+          };
+        }
+      ).emailVerification;
+      await emailVerifications?.deleteMany?.({ where: { userId } });
       await tx.gdprRequest.create({
         data: {
           userId,
+          buildingId: user.buildingId,
           type: 'DELETE',
           status: 'COMPLETED',
           completedAt: new Date(),

@@ -16,5 +16,10 @@ export class CreateOwnershipDto {
 
   @IsOptional()
   @IsISO8601()
-  periodStart?: string;
+  periodStart?: string | null;
+
+  /** Optional inclusive end of the ownership period. */
+  @IsOptional()
+  @IsISO8601()
+  periodEnd?: string | null;
 }

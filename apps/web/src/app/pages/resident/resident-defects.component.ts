@@ -1,16 +1,35 @@
-import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  OnInit,
+  inject,
+  signal,
+} from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { EMPTY, catchError } from 'rxjs';
-import { JobWithBids, JobsApiService, jobStatusBadge } from '../../core/api/jobs-api.service';
+import {
+  JobWithBids,
+  JobsApiService,
+  jobStatusBadge,
+} from '../../core/api/jobs-api.service';
 import { AuthService } from '../../core/auth.service';
 import { ToastService } from '../../ui/toast.service';
 
 /** A job row flagged as a resident defect report (source comes from Job). */
 export type DefectRow = JobWithBids;
 
-/** Keeps only jobs reported by residents (pure). */
-export function ownReports(jobs: readonly DefectRow[]): DefectRow[] {
-  return jobs.filter((job) => job.source === 'RESIDENT_REPORT');
+/** Keeps own reports, including reports already converted to a public RFP. */
+export function ownReports(
+  jobs: readonly DefectRow[],
+  userId: string | null,
+  rememberedIds: ReadonlySet<string> = new Set(),
+): DefectRow[] {
+  return jobs.filter(
+    (job) =>
+      job.source === 'RESIDENT_REPORT' ||
+      (!!userId && job.reportedById === userId) ||
+      rememberedIds.has(job.id),
+  );
 }
 
 @Component({
@@ -32,7 +51,12 @@ export function ownReports(jobs: readonly DefectRow[]): DefectRow[] {
         </div>
         <div>
           <label class="label" for="description">Περιγραφή</label>
-          <textarea id="description" rows="3" class="input" formControlName="description"></textarea>
+          <textarea
+            id="description"
+            rows="3"
+            class="input"
+            formControlName="description"
+          ></textarea>
           @if (submitted() && form.controls.description.invalid) {
             <p class="field-error">Η περιγραφή είναι υποχρεωτική.</p>
           }
@@ -60,15 +84,22 @@ export function ownReports(jobs: readonly DefectRow[]): DefectRow[] {
             <div class="flex items-start justify-between gap-2">
               <div>
                 <h3 class="font-semibold text-slate-900">{{ report.title }}</h3>
-                <p class="mt-1 text-sm text-slate-600">{{ report.description }}</p>
+                <p class="mt-1 text-sm text-slate-600">
+                  {{ report.description }}
+                </p>
               </div>
-              <span class="badge shrink-0" [class]="jobStatusBadge(report.status).cls">
+              <span
+                class="badge shrink-0"
+                [class]="jobStatusBadge(report.status).cls"
+              >
                 {{ jobStatusBadge(report.status).label }}
               </span>
             </div>
           </div>
         } @empty {
-          <div class="card text-sm text-slate-500">Δεν έχετε υποβάλει αναφορές ακόμη.</div>
+          <div class="card text-sm text-slate-500">
+            Δεν έχετε υποβάλει αναφορές ακόμη.
+          </div>
         }
       </div>
     }
@@ -117,7 +148,14 @@ export class ResidentDefectsPage implements OnInit {
         }),
       )
       .subscribe((jobs) => {
-        this.reports.set(ownReports(jobs));
+        const remembered = this.rememberedReportIds();
+        for (const job of jobs) {
+          if (job.source === 'RESIDENT_REPORT') remembered.add(job.id);
+        }
+        this.rememberReportIds(remembered);
+        this.reports.set(
+          ownReports(jobs, this.auth.currentUser()?.id ?? null, remembered),
+        );
         this.loading.set(false);
       });
   }
@@ -140,12 +178,43 @@ export class ResidentDefectsPage implements OnInit {
           return EMPTY;
         }),
       )
-      .subscribe(() => {
+      .subscribe((created) => {
+        const remembered = this.rememberedReportIds();
+        remembered.add(created.id);
+        this.rememberReportIds(remembered);
         this.toast.success('Η αναφορά καταχωρήθηκε');
         this.saving.set(false);
         this.submitted.set(false);
         this.form.reset({ title: '', description: '' });
         this.reload();
       });
+  }
+
+  private reportStorageKey(): string {
+    const userId = this.auth.currentUser()?.id ?? 'anonymous';
+    const buildingId = this.auth.currentUser()?.buildingId ?? 'none';
+    return `resident-defect-ids:${userId}:${buildingId}`;
+  }
+
+  private rememberedReportIds(): Set<string> {
+    try {
+      const raw = sessionStorage.getItem(this.reportStorageKey());
+      const ids = raw ? (JSON.parse(raw) as unknown) : [];
+      return new Set(
+        Array.isArray(ids)
+          ? ids.filter((id): id is string => typeof id === 'string')
+          : [],
+      );
+    } catch {
+      return new Set();
+    }
+  }
+
+  private rememberReportIds(ids: ReadonlySet<string>): void {
+    try {
+      sessionStorage.setItem(this.reportStorageKey(), JSON.stringify([...ids]));
+    } catch {
+      // The API-provided reportedById remains the primary persistence path.
+    }
   }
 }

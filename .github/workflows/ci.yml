@@ -12,34 +12,173 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  NODE_ENV: test
+  PORT: 3000
+  E2E_HOST: 127.0.0.1
+  E2E_PORT: 3000
+  E2E_API_URL: http://127.0.0.1:3000/api
+  E2E_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
+  RATE_LOGIN_LIMIT: 100
+  RATE_LOGIN_TTL_MS: 60000
+  THROTTLE_LIMIT: 1000
+  THROTTLE_TTL_MS: 60000
+  JWT_ACCESS_SECRET: ci-access-secret-0123456789abcdef
+  JWT_REFRESH_SECRET: ci-refresh-secret-0123456789abcdef
+  JWT_2FA_SECRET: ci-2fa-secret-0123456789abcdef
+  CORS_ORIGINS: http://127.0.0.1:4200
+
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
-      # No `packageManager` field in package.json - pnpm major is pinned here.
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 10.34.5
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
 
-      - name: Install dependencies
+      - name: Install dependencies from the lockfile
         run: pnpm install --frozen-lockfile
 
       - name: Generate Prisma client
         run: pnpm exec prisma generate --schema=apps/api/prisma/schema.prisma
 
-      # Unit tests must not require a database - no services are started yet.
-      # A Postgres service container will be added when API e2e tests arrive.
-      - name: Lint, test and build
-        run: pnpm nx run-many -t lint test build --all
+      # Use the explicit Nx target selector. A bare `-t lint test build`
+      # is ambiguous across Nx versions and can accidentally include E2E jobs.
+      - name: Lint, unit test and build workspace targets
+        run: >-
+          pnpm nx run-many
+          --targets=lint,test,build
+          --projects=api,web,shared,@polykatoikia/mobile
+          --parallel=1
+          --outputStyle=static
 
-      # Future use: restrict to projects affected by the change set instead.
-      # - name: Lint, test and build (affected)
-      #   run: pnpm nx affected -t lint test build
+      - name: Check Expo public config
+        run: pnpm nx run @polykatoikia/mobile:export
+
+  api-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: polykatoikia_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d polykatoikia_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/polykatoikia_e2e?schema=public
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies from the lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm exec prisma generate --schema=apps/api/prisma/schema.prisma
+
+      - name: Apply checked-in migrations
+        run: pnpm exec prisma migrate deploy --schema=apps/api/prisma/schema.prisma
+
+      - name: Seed deterministic demo fixtures
+        working-directory: apps/api
+        run: pnpm exec prisma db seed --schema=prisma/schema.prisma
+
+      - name: Start API on port 3000
+        run: |
+          set -euo pipefail
+          NODE_ENV=development pnpm nx run api:serve:development > /tmp/polykatoikia-api.log 2>&1 &
+          api_pid=$!
+          cleanup() {
+            kill "$api_pid" 2>/dev/null || true
+            wait "$api_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3000/api >/dev/null; then
+              break
+            fi
+            if ! kill -0 "$api_pid" 2>/dev/null; then
+              cat /tmp/polykatoikia-api.log
+              exit 1
+            fi
+            sleep 1
+          done
+          if ! curl --fail --silent http://127.0.0.1:3000/api >/dev/null; then
+            cat /tmp/polykatoikia-api.log
+            exit 1
+          fi
+          pnpm nx run api-e2e:e2e --excludeTaskDependencies --outputStyle=static
+
+  web-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: polykatoikia_web_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d polykatoikia_web_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/polykatoikia_web_e2e?schema=public
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies from the lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm exec prisma generate --schema=apps/api/prisma/schema.prisma
+
+      - name: Apply checked-in migrations
+        run: pnpm exec prisma migrate deploy --schema=apps/api/prisma/schema.prisma
+
+      - name: Seed deterministic demo fixtures
+        working-directory: apps/api
+        run: pnpm exec prisma db seed --schema=prisma/schema.prisma
+
+      - name: Install the pinned browser runtime
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run Playwright E2E
+        run: pnpm nx run web-e2e:e2e-ci --outputStyle=static

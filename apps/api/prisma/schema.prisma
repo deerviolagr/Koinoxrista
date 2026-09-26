@@ -101,12 +101,12 @@ model Building {
   createdAt DateTime @default(now())
 
   // Feature 2 (PSP selection) + Feature 3 (open join) + Feature 19 (JP e-invoice)
-  pspProvider           String?  @default("viva")
+  pspProvider           String? @default("viva")
   /// International market profile (synthetic region code, default "GR").
-  market                String   @default("GR")
+  market                String  @default("GR")
   /// ISO-4217 currency for the building (default "EUR" for Greece).
-  currency              String   @default("EUR")
-  joinCode              String   @default("")
+  currency              String  @default("EUR")
+  joinCode              String  @default("")
   invoiceRegistrationNo String?
 
   units                  Unit[]
@@ -198,10 +198,10 @@ model Unit {
   lateFeeCharges LateFeeCharge[]
   attendances    Attendance[]
   meters         Meter[]
-  paymentPlans    PaymentPlan[]
-  levyShares      LevyShare[]
-  legalCases      LegalCase[]
-  productOrders   ProductOrder[]
+  paymentPlans   PaymentPlan[]
+  levyShares     LevyShare[]
+  legalCases     LegalCase[]
+  productOrders  ProductOrder[]
 
   @@unique([buildingId, label])
   @@index([buildingId])
@@ -251,9 +251,9 @@ model User {
   invitesSent           Invite[]                @relation("InvitesSent")
 
   emailVerifications EmailVerification[]
-  campaignsCreated   Campaign[]              @relation("CampaignCreatedBy")
+  campaignsCreated   Campaign[]          @relation("CampaignCreatedBy")
   pointTransactions  PointTransaction[]
-  adminPermissions   AdminPermission[]       @relation("AdminPermissionGrantedBy")
+  adminPermissions   AdminPermission[]   @relation("AdminPermissionGrantedBy")
   inspections        InspectionRecord[]
 
   @@index([buildingId])
@@ -319,6 +319,7 @@ model Ownership {
   userId         String
   shareMillimes  Int
   periodStart    DateTime?
+  periodEnd      DateTime?
   occupantType   String    @default("OWNER")
   votingEligible Boolean   @default(true)
   residentRole   String?
@@ -390,6 +391,8 @@ model Invoice {
   totalCents      Int
   paidCents       Int           @default(0)
   status          PaymentStatus @default(PENDING)
+  issuedAt        DateTime      @default(now())
+  createdAt       DateTime      @default(now())
 
   building       Building        @relation(fields: [buildingId], references: [id])
   unit           Unit            @relation(fields: [unitId], references: [id])
@@ -438,11 +441,24 @@ model PaymentOrder {
   amountCents Int
   status      PaymentOrderState @default(PENDING)
   checkoutUrl String
+  provider    String            @default("viva")
+  currency    String            @default("EUR")
+  /// Provider checkout/session reference (Stripe session, MP preference, Viva order).
+  sessionRef  String?
+  /// Provider payment reference (Stripe PaymentIntent, MP payment id).
+  paymentRef  String?
+  /// Provider event/transaction reference; unique for replay protection.
+  eventRef    String?           @unique
+  pspRef      String?           @unique
+  settledAt   DateTime?
   createdAt   DateTime          @default(now())
 
-  invoice Invoice @relation(fields: [invoiceId], references: [id])
+  invoice Invoice  @relation(fields: [invoiceId], references: [id])
+  payment Payment?
 
   @@index([invoiceId])
+  @@index([provider, sessionRef])
+  @@index([provider, paymentRef])
 }
 
 enum PaymentOrderState {
@@ -453,17 +469,24 @@ enum PaymentOrderState {
 }
 
 model Payment {
-  id          String        @id @default(cuid())
-  invoiceId   String
-  method      PaymentMethod
-  pspRef      String?
-  amountCents Int
-  status      PaymentStatus
-  createdAt   DateTime      @default(now())
+  id             String        @id @default(cuid())
+  invoiceId      String
+  paymentOrderId String?       @unique
+  provider       String?
+  currency       String?
+  eventRef       String?
+  method         PaymentMethod
+  /// A PSP transaction reference is replay-safe and may identify only one payment.
+  pspRef         String?       @unique
+  amountCents    Int
+  status         PaymentStatus
+  createdAt      DateTime      @default(now())
 
-  invoice Invoice @relation(fields: [invoiceId], references: [id])
+  invoice      Invoice       @relation(fields: [invoiceId], references: [id])
+  paymentOrder PaymentOrder? @relation(fields: [paymentOrderId], references: [id])
 
   @@index([invoiceId])
+  @@index([provider, currency])
 }
 
 model Vote {
@@ -499,18 +522,19 @@ model Ballot {
 }
 
 model Job {
-  id           String  @id @default(cuid())
+  id           String   @id @default(cuid())
   buildingId   String
   title        String
   description  String
-  status       String  @default("OPEN")
+  status       String   @default("OPEN")
   budgetCents  Int?
   /// ADMIN_RFP (default) or RESIDENT_REPORT awaiting admin conversion.
-  source       String  @default("ADMIN_RFP")
+  source       String   @default("ADMIN_RFP")
   reportedById String?
+  createdAt    DateTime @default(now())
 
-  building         Building          @relation(fields: [buildingId], references: [id])
-  reportedBy       User?             @relation("ReportedJobs", fields: [reportedById], references: [id])
+  building         Building           @relation(fields: [buildingId], references: [id])
+  reportedBy       User?              @relation("ReportedJobs", fields: [reportedById], references: [id])
   bids             Bid[]
   workLogs         WorkLog[]
   supplierPayments SupplierPayment[]
@@ -1276,7 +1300,7 @@ model SupplierInvoice {
 model RefreshSession {
   id         String    @id @default(cuid())
   userId     String
-  tokenHash  String
+  tokenHash  String    @unique
   userAgent  String?
   ip         String?
   lastUsedAt DateTime  @default(now())
@@ -1286,38 +1310,37 @@ model RefreshSession {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
-  @@index([tokenHash])
 }
 
 model BuildingAsset {
-  id          String   @id @default(uuid())
+  id          String    @id @default(uuid())
   buildingId  String
   name        String
   category    String // ELEVATOR | BOILER | FIRE_EXT | PUMP | ROOF | OTHER
   location    String?
   installedAt DateTime?
   notes       String?
-  createdAt   DateTime @default(now())
+  createdAt   DateTime  @default(now())
 
-  building Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
-  schedules MaintenanceSchedule[]
+  building    Building              @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  schedules   MaintenanceSchedule[]
   inspections InspectionRecord[]
 
   @@index([buildingId, category])
 }
 
 model MaintenanceSchedule {
-  id                String   @id @default(uuid())
+  id                String    @id @default(uuid())
   assetId           String
   buildingId        String
   title             String
   intervalMonths    Int
   lastDoneAt        DateTime?
   nextDueAt         DateTime
-  autoCreateJob     Boolean  @default(true)
+  autoCreateJob     Boolean   @default(true)
   expenseCategoryId String?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   asset    BuildingAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
   building Building      @relation(fields: [buildingId], references: [id], onDelete: Cascade)
@@ -1327,7 +1350,7 @@ model MaintenanceSchedule {
 }
 
 model LegalCase {
-  id          String   @id @default(uuid())
+  id          String    @id @default(uuid())
   buildingId  String
   unitId      String
   title       String
@@ -1339,11 +1362,11 @@ model LegalCase {
   lawyerEmail String?
   notes       String?
   lastSentAt  DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
-  building Building   @relation(fields: [buildingId], references: [id], onDelete: Cascade)
-  unit     Unit       @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  building Building     @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  unit     Unit         @relation(fields: [unitId], references: [id], onDelete: Cascade)
   events   LegalEvent[]
 
   @@index([buildingId, stage])
@@ -1351,7 +1374,7 @@ model LegalCase {
 }
 
 model LegalEvent {
-  id         String  @id @default(uuid())
+  id         String   @id @default(uuid())
   caseId     String
   buildingId String
   type       String // CREATED | NOTICE_SENT | ESCALATED | CLOSED | NOTE
@@ -1366,13 +1389,13 @@ model LegalEvent {
 
 /// Feature 1: ledger of scheduled background-job runs (idempotency + observability).
 model JobRun {
-  id         String   @id @default(cuid())
+  id         String    @id @default(cuid())
   buildingId String?
   jobType    String
   period     String?
   status     String // RUNNING | SUCCESS | FAILED
   message    String?
-  startedAt  DateTime @default(now())
+  startedAt  DateTime  @default(now())
   finishedAt DateTime?
 
   building Building? @relation(fields: [buildingId], references: [id], onDelete: Cascade)
@@ -1383,13 +1406,13 @@ model JobRun {
 
 /// Feature 3: email verification for open registration.
 model EmailVerification {
-  id          String    @id @default(cuid())
-  userId      String
-  buildingId  String?
-  tokenHash   String    @unique
-  expiresAt   DateTime
-  consumedAt  DateTime?
-  createdAt   DateTime  @default(now())
+  id         String    @id @default(cuid())
+  userId     String
+  buildingId String?
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
 
   user     User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
   building Building? @relation(fields: [buildingId], references: [id], onDelete: Cascade)
@@ -1399,19 +1422,19 @@ model EmailVerification {
 
 /// Feature 9: mass-email marketing module.
 model Campaign {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   buildingId  String
   subject     String
   body        String
-  audience    String   @default("ALL")
-  status      String   @default("DRAFT") // DRAFT | SCHEDULED | SENDING | SENT
+  audience    String    @default("ALL")
+  status      String    @default("DRAFT") // DRAFT | SCHEDULED | SENDING | SENT
   scheduledAt DateTime?
   sentAt      DateTime?
-  sentCount   Int      @default(0)
-  failCount   Int      @default(0)
-  trackOpens  Boolean  @default(true)
+  sentCount   Int       @default(0)
+  failCount   Int       @default(0)
+  trackOpens  Boolean   @default(true)
   createdById String
-  createdAt   DateTime @default(now())
+  createdAt   DateTime  @default(now())
 
   building   Building            @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   createdBy  User                @relation("CampaignCreatedBy", fields: [createdById], references: [id])
@@ -1458,13 +1481,13 @@ model PointTransaction {
 
 /// Feature 13: inventory / product catalog (one-off purchases).
 model Product {
-  id         String  @id @default(cuid())
+  id         String   @id @default(cuid())
   buildingId String
   name       String
   priceCents Int
-  stock      Int     @default(0)
+  stock      Int      @default(0)
   imageKey   String?
-  active     Boolean @default(true)
+  active     Boolean  @default(true)
   createdAt  DateTime @default(now())
 
   building Building       @relation(fields: [buildingId], references: [id], onDelete: Cascade)
@@ -1503,8 +1526,8 @@ model AdminPermission {
   grantedById   String
   createdAt     DateTime @default(now())
 
-  user      User     @relation("AdminPermissionGrantedBy", fields: [grantedById], references: [id])
-  building  Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  user     User     @relation("AdminPermissionGrantedBy", fields: [grantedById], references: [id])
+  building Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
 
   @@unique([userId, buildingId, permissionKey])
   @@index([buildingId])
@@ -1512,7 +1535,7 @@ model AdminPermission {
 
 /// Feature 15: facility inspection / asset lifecycle records.
 model InspectionRecord {
-  id          String    @id @default(uuid())
+  id          String   @id @default(uuid())
   assetId     String
   buildingId  String
   inspectedAt DateTime
@@ -1521,12 +1544,12 @@ model InspectionRecord {
   photoKey    String?
   notes       String?
   jobId       String?
-  createdAt   DateTime  @default(now())
+  createdAt   DateTime @default(now())
 
-  asset    BuildingAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
-  building Building      @relation(fields: [buildingId], references: [id], onDelete: Cascade)
-  inspector User?        @relation(fields: [inspectorId], references: [id], onDelete: SetNull)
-  job      Job?          @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  asset     BuildingAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  building  Building      @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  inspector User?         @relation(fields: [inspectorId], references: [id], onDelete: SetNull)
+  job       Job?          @relation(fields: [jobId], references: [id], onDelete: SetNull)
 
   @@index([assetId, inspectedAt])
   @@index([buildingId])
@@ -1534,16 +1557,16 @@ model InspectionRecord {
 
 /// Feature 18: outbound webhook endpoints + delivery log.
 model WebhookEndpoint {
-  id         String    @id @default(cuid())
+  id         String   @id @default(cuid())
   buildingId String
   url        String
   secret     String
   events     String[]
-  active     Boolean   @default(true)
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
-  building   Building            @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  building   Building          @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   deliveries WebhookDelivery[]
 
   @@index([buildingId, active])
@@ -1587,15 +1610,15 @@ model BuildingWeeklySnapshot {
 }
 
 model AlertRule {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   buildingId  String
   metric      String // COLLECTION_RATE | ARREARS_WOW | DEFECTS_7D | PSP_FAILURES
   threshold   Float
-  window      String   @default("7d")
-  active      Boolean  @default(true)
+  window      String    @default("7d")
+  active      Boolean   @default(true)
   lastFiredAt DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   building Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
 

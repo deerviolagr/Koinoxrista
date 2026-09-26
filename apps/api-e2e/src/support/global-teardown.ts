@@ -1,9 +1,8 @@
-import { killPort } from '@nx/node/utils';
-
-module.exports = async function () {
-  // Put clean up logic here (e.g. stopping services, docker-compose, etc.).
-  // Hint: `globalThis` is shared between setup and teardown.
-  const port = process.env.PORT ? Number(process.env.PORT) : 3000;
-  await killPort(port);
-  console.log((globalThis as { __TEARDOWN_MESSAGE__?: string }).__TEARDOWN_MESSAGE__);
+module.exports = async function globalTeardown() {
+  // The API process is owned by the Nx/CI job, not by Jest. Killing port 3000
+  // here could terminate an unrelated local development server.
+  console.log(
+    (globalThis as { __TEARDOWN_MESSAGE__?: string }).__TEARDOWN_MESSAGE__ ??
+      '\nAPI E2E teardown complete.\n',
+  );
 };

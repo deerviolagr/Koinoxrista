@@ -12,10 +12,8 @@ import { Observable, interval, map } from 'rxjs';
 import { JWT_REFRESH_SECRET, REFRESH_COOKIE_NAME } from '../auth/auth.types';
 import type { HttpRequest, HttpResponse } from '../auth/auth.types';
 import { PrismaService } from '../prisma/prisma.service';
-import {
-  RealtimeEvent,
-  RealtimeService,
-} from './realtime.service';
+import { SessionsService } from '../sessions/sessions.service';
+import { RealtimeEvent, RealtimeService } from './realtime.service';
 
 const HEARTBEAT_MS = 25_000;
 
@@ -38,6 +36,7 @@ export class RealtimeController {
     private readonly realtime: RealtimeService,
     private readonly jwt: JwtService,
     private readonly prisma: PrismaService,
+    private readonly sessions?: SessionsService,
   ) {}
 
   @Sse('events')
@@ -104,22 +103,39 @@ export class RealtimeController {
     }
     if (payload.type !== 'refresh' || !payload.sub) return null;
 
+    // A validly signed JWT is not enough: the refresh session must still be
+    // live and belong to the same subject. This check is mandatory in the
+    // application module; the optional parameter keeps direct unit construction
+    // backwards-compatible.
+    if (!this.sessions && process.env.NODE_ENV === 'production') return null;
+    if (this.sessions) {
+      try {
+        await this.sessions.assertNotRevoked(token, payload.sub);
+      } catch {
+        return null;
+      }
+    }
+
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
     });
-    if (!user) return null;
+    if (!user || user.status !== 'ACTIVE') return null;
     return { id: user.id, buildingId: user.buildingId };
   }
 
   private readRefreshCookie(req: HttpRequest): string | undefined {
-    const header = req.headers.cookie;
+    const header = req?.headers?.cookie;
     if (!header) return undefined;
     for (const part of header.split(';')) {
       const separator = part.indexOf('=');
       if (separator === -1) continue;
       const name = part.slice(0, separator).trim();
       if (name === REFRESH_COOKIE_NAME) {
-        return part.slice(separator + 1).trim();
+        try {
+          return decodeURIComponent(part.slice(separator + 1).trim());
+        } catch {
+          return undefined;
+        }
       }
     }
     return undefined;

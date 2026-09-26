@@ -5,12 +5,15 @@ import {
 } from '@nestjs/common';
 
 import { AuthenticatedUser } from '../auth/auth.types';
-import { isValidPeriod } from '@org/shared';
+import { isValidPeriod, TOTAL_MILLIMES } from '@org/shared';
 import { assertSameBuilding } from '../common/tenant';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { splitByLargestRemainder, SplitResult } from '../prisma/split-by-largest-remainder';
-import { resolveAllocationWeights } from './allocation-weights';
+import {
+  assertSupportedAllocationStrategy,
+  resolveAllocationWeights,
+} from './allocation-weights';
 import {
   isMetersStrategy,
   splitByMeterReading,
@@ -33,6 +36,12 @@ export class ExpensesService {
     user: AuthenticatedUser,
   ) {
     assertSameBuilding(user, buildingId);
+    if (typeof dto.description !== 'string' || dto.description.trim().length === 0) {
+      throw new BadRequestException('description must not be blank');
+    }
+    if (!Number.isSafeInteger(dto.totalCents) || dto.totalCents <= 0) {
+      throw new BadRequestException('totalCents must be a positive integer amount');
+    }
     if (!isValidPeriod(dto.periodYearMonth)) {
       throw new BadRequestException('periodYearMonth must match YYYY-MM');
     }
@@ -51,18 +60,53 @@ export class ExpensesService {
     if (units.length === 0) {
       throw new BadRequestException('Building has no units to allocate to');
     }
+    if (
+      units.some(
+        (unit) => !Number.isInteger(unit.millimes) || unit.millimes <= 0,
+      )
+    ) {
+      throw new BadRequestException('Every unit must have positive integer millimes');
+    }
+    if (new Set(units.map((unit) => unit.id)).size !== units.length) {
+      throw new BadRequestException('Building units must have unique ids');
+    }
+    const millimesTotal = units.reduce((sum, unit) => sum + unit.millimes, 0);
+    if (millimesTotal !== TOTAL_MILLIMES) {
+      throw new BadRequestException(
+        `units must total ${TOTAL_MILLIMES} millimes before an expense can be allocated (got ${millimesTotal})`,
+      );
+    }
+    assertSupportedAllocationStrategy(category.strategy);
 
-    const splits: SplitResult[] = isMetersStrategy(category.strategy)
-      ? await this.splitByUnitConsumption(
-          buildingId,
-          units,
-          dto.totalCents,
-          dto.periodYearMonth,
-        )
-      : splitByLargestRemainder(
+    let splits: SplitResult[];
+    if (isMetersStrategy(category.strategy)) {
+      splits = await this.splitByUnitConsumption(
+        buildingId,
+        units,
+        dto.totalCents,
+        dto.periodYearMonth,
+      );
+    } else {
+      try {
+        splits = splitByLargestRemainder(
           dto.totalCents,
           resolveAllocationWeights(units, category.strategy),
         );
+      } catch (error) {
+        if (error instanceof BadRequestException) throw error;
+        throw new BadRequestException(
+          error instanceof Error ? error.message : 'Invalid allocation weights',
+        );
+      }
+    }
+    if (
+      splits.length !== units.length ||
+      splits.reduce((sum, split) => sum + split.amountCents, 0) !== dto.totalCents
+    ) {
+      throw new BadRequestException(
+        'Allocation must include every unit and must sum exactly to totalCents',
+      );
+    }
 
     const expense = await this.prisma.$transaction(async (tx) => {
       const created = await tx.expense.create({
@@ -117,11 +161,15 @@ export class ExpensesService {
       buildingId,
       periodYearMonth,
     );
+    const unitIdSet = new Set(units.map((unit) => unit.id));
+    const buildingConsumptions = consumptions.filter((consumption) =>
+      unitIdSet.has(consumption.unitId),
+    );
     validateAllUnitsHaveReadings(
       units.map((unit) => unit.id),
-      consumptions.filter((consumption) => consumption.hasReadings),
+      buildingConsumptions.filter((consumption) => consumption.hasReadings),
     );
-    return splitByMeterReading(totalCents, consumptions).map((share) => ({
+    return splitByMeterReading(totalCents, buildingConsumptions).map((share) => ({
       id: share.unitId,
       amountCents: share.amountCents,
     }));

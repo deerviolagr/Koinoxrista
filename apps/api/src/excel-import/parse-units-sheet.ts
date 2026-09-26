@@ -2,9 +2,9 @@ import ExcelJS from 'exceljs';
 import { TOTAL_MILLIMES } from '@org/shared';
 import type { UnitImportRowDto } from '@org/shared';
 
-/** Hard cap per row; Σ across rows may exceed 1000 (warning only). */
-export const MILLIMES_MIN = 0;
-export const MILLIMES_MAX = 10_000;
+/** Unit millimes are positive integer shares of the 1000‰ building budget. */
+export const MILLIMES_MIN = 1;
+export const MILLIMES_MAX = TOTAL_MILLIMES;
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 

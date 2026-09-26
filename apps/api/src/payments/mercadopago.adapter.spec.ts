@@ -83,6 +83,17 @@ describe('RealMercadoPagoAdapter (P0-2 BR/MX/AR/CL/CO/PE)', () => {
 });
 
 describe('MockMercadoPagoAdapter', () => {
+  const previousMockMode = process.env.PAYMENTS_MOCK_MODE;
+
+  beforeEach(() => {
+    process.env.PAYMENTS_MOCK_MODE = 'true';
+  });
+
+  afterEach(() => {
+    if (previousMockMode === undefined) delete process.env.PAYMENTS_MOCK_MODE;
+    else process.env.PAYMENTS_MOCK_MODE = previousMockMode;
+  });
+
   it('returns a sandbox checkout URL and COMPLETED status', async () => {
     const adapter = new MockMercadoPagoAdapter();
     const result = await adapter.createCheckout({

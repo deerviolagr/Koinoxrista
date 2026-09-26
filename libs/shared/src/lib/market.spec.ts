@@ -4,6 +4,7 @@ import {
   MARKET_REGISTRY,
   marketCurrency,
   resolveMarket,
+  validateMarketSettings,
 } from './market';
 import {
   ANNUAL_DISCOUNT_BPS,
@@ -51,6 +52,36 @@ describe('market registry', () => {
     for (const code of Object.keys(MARKET_REGISTRY)) {
       expect(resolveMarket(code).market).toBe(code);
     }
+  });
+
+  it('includes the Japanese profile and validates provider/currency tuples', () => {
+    expect(resolveMarket('JP')).toMatchObject({
+      market: 'JP',
+      currency: 'JPY',
+      pspProvider: 'stripejp',
+      locale: 'ja-JP',
+    });
+    expect(() =>
+      validateMarketSettings({
+        market: 'JP',
+        currency: 'JPY',
+        pspProvider: 'stripejp',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateMarketSettings({
+        market: 'GR',
+        currency: 'USD',
+        pspProvider: 'viva',
+      }),
+    ).toThrow();
+    expect(() =>
+      validateMarketSettings({
+        market: 'EU',
+        currency: 'GBP',
+        pspProvider: 'viva',
+      }),
+    ).toThrow();
   });
 });
 

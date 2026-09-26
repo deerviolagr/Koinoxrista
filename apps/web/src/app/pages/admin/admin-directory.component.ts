@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
-import { Router } from '@angular/router';
-import { EMPTY, catchError, of } from 'rxjs';
+import { ActivatedRoute, Router } from '@angular/router';
+import { EMPTY, catchError } from 'rxjs';
 import type { FeaturedSlotDto } from '@org/shared';
 import { BuildingsApiService } from '../../core/api/buildings-api.service';
 import {
@@ -12,7 +12,7 @@ import {
   ProvidersApiService,
 } from '../../core/api/providers-api.service';
 import { ToastService } from '../../ui/toast.service';
-import { formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 
 /** Directory row enriched by the API with an optional active featured slot. */
 type DirectoryItem = ProviderDirectoryItem & { featuredUntil?: string | null };
@@ -23,6 +23,12 @@ type DirectoryItem = ProviderDirectoryItem & { featuredUntil?: string | null };
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <h1 class="mb-6 text-xl font-bold text-slate-900">Τεχνικοί</h1>
+    @if (selectedProviderId(); as providerId) {
+      <div class="card mb-4 border-blue-200 bg-blue-50 text-sm text-blue-800">
+        Επιλεκμένος τεχνικός: <span class="font-medium">{{ providerId }}</span>.
+        <button type="button" class="ml-2 underline" (click)="selectedProviderId.set(null)">Καθαρισμός</button>
+      </div>
+    }
 
     <form
       [formGroup]="filters"
@@ -69,7 +75,8 @@ type DirectoryItem = ProviderDirectoryItem & { featuredUntil?: string | null };
       </div>
     } @else if (error()) {
       <div class="card border-red-200 bg-red-50 text-sm text-red-700">
-        Αποτυχία φόρτωσης τεχνικών. Δοκιμάστε ξανά.
+        <p>Αποτυχία φόρτωσης τεχνικών.</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="loadBuilding()">Δοκιμή ξανά</button>
       </div>
     } @else {
       @if (hasFeatured()) {
@@ -141,7 +148,7 @@ type DirectoryItem = ProviderDirectoryItem & { featuredUntil?: string | null };
               class="btn btn-primary mt-auto self-start !px-3 !py-1 text-xs"
               (click)="newJobWith(p.userId)"
             >
-              Νέα εργασία με αυτόν τον τεχνικό
+              Νέα εργασία — ο τεχνικός μπορεί να υποβάλει προσφορά
             </button>
           </article>
         } @empty {
@@ -198,6 +205,12 @@ type DirectoryItem = ProviderDirectoryItem & { featuredUntil?: string | null };
         </div>
       </form>
 
+      @if (slotLoadError()) {
+        <div class="m-4 border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          <p>Αποτυχία φόρτωσης προτεινόμενων θέσεων.</p>
+          <button type="button" class="btn btn-secondary mt-2" (click)="reloadSlots()">Δοκιμή ξανά</button>
+        </div>
+      }
       <table class="data-table">
         <thead>
           <tr>
@@ -242,13 +255,17 @@ export class AdminDirectoryPage implements OnInit {
   private readonly providersApi = inject(ProvidersApiService);
   private readonly marketplaceApi = inject(MarketplaceApiService);
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly router = inject(Router);
+  private readonly route = inject(ActivatedRoute);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
 
   protected readonly results = signal<DirectoryItem[]>([]);
+  protected readonly selectedProviderId = signal<string | null>(null);
   protected readonly loading = signal(true);
   protected readonly error = signal(false);
 
@@ -256,6 +273,7 @@ export class AdminDirectoryPage implements OnInit {
   protected readonly creatingSlot = signal(false);
   protected readonly deletingId = signal<string | null>(null);
   protected readonly slotFormError = signal<string | null>(null);
+  protected readonly slotLoadError = signal(false);
 
   protected readonly ratingOptions = [1, 2, 3, 4, 5];
   protected readonly starValues = [1, 2, 3, 4, 5];
@@ -278,10 +296,23 @@ export class AdminDirectoryPage implements OnInit {
   private buildingId: string | null = null;
 
   ngOnInit(): void {
+    this.selectedProviderId.set(this.route.snapshot.queryParamMap.get('provider'));
     this.applyFilters();
+    this.loadBuilding();
+  }
+
+  protected loadBuilding(): void {
+    this.loading.set(true);
+    this.error.set(false);
     this.buildingsApi
       .mine()
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => {
+          this.error.set(true);
+          this.loading.set(false);
+          return EMPTY;
+        }),
+      )
       .subscribe((building) => {
         this.buildingId = building.id;
         this.reloadSlots();
@@ -372,6 +403,7 @@ export class AdminDirectoryPage implements OnInit {
       })
       .pipe(
         catchError(() => {
+          this.creatingSlot.set(false);
           this.toast.error(
             'Η δημιουργία απέτυχε — ελέγξτε για επικαλυπτόμενη προβολή.',
           );
@@ -392,12 +424,17 @@ export class AdminDirectoryPage implements OnInit {
     this.deletingId.set(slot.id);
     this.marketplaceApi
       .deleteFeaturedSlot(this.buildingId, slot.id)
-      .pipe(catchError(() => of(null)))
-      .subscribe(() => {
-        this.deletingId.set(null);
-        this.toast.success('Η προβολή διαγράφηκε.');
-        this.reloadSlots();
-        this.applyFilters();
+      .subscribe({
+        next: () => {
+          this.deletingId.set(null);
+          this.toast.success('Η προβολή διαγράφηκε.');
+          this.reloadSlots();
+          this.applyFilters();
+        },
+        error: () => {
+          this.deletingId.set(null);
+          this.toast.error('Η διαγραφή της προβολής απέτυχε.');
+        },
       });
   }
 
@@ -407,11 +444,17 @@ export class AdminDirectoryPage implements OnInit {
     });
   }
 
-  private reloadSlots(): void {
+  protected reloadSlots(): void {
     if (!this.buildingId) return;
+    this.slotLoadError.set(false);
     this.marketplaceApi
       .featuredSlots(this.buildingId)
-      .pipe(catchError(() => of([])))
+      .pipe(
+        catchError(() => {
+          this.slotLoadError.set(true);
+          return EMPTY;
+        }),
+      )
       .subscribe((slots) => this.slots.set(slots));
   }
 }

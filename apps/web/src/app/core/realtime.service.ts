@@ -1,9 +1,4 @@
-import {
-  Injectable,
-  effect,
-  inject,
-  signal,
-} from '@angular/core';
+import { Injectable, effect, inject, signal } from '@angular/core';
 import { Router } from '@angular/router';
 import { environment } from '../../environments/environment';
 import { AuthService } from './auth.service';
@@ -35,6 +30,7 @@ export class RealtimeService {
   private source: EventSource | null = null;
   private handlers = new Map<string, Set<Handler>>();
   private retryDelay = 2_000;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
 
   constructor() {
@@ -77,10 +73,9 @@ export class RealtimeService {
   }
 
   private connect(): void {
-    if (this.source || this.disposed) return;
+    if (this.source || this.disposed || !this.auth.currentUser()) return;
     const source = new EventSource(`${environment.apiUrl}/realtime/events`);
     this.source = source;
-    this.connected.set(true);
 
     source.onmessage = () => {
       // Heartbeats arrive as unnamed messages; nothing to do.
@@ -110,8 +105,9 @@ export class RealtimeService {
         const delay = this.retryDelay;
         this.retryDelay = Math.min(delay * 2, 30_000);
         if (!this.disposed) {
-          setTimeout(() => {
-            if (!this.source) this.connect();
+          this.retryTimer = setTimeout(() => {
+            this.retryTimer = null;
+            if (!this.source && this.auth.currentUser()) this.connect();
           }, delay);
         }
       }
@@ -142,6 +138,8 @@ export class RealtimeService {
   }
 
   private close(): void {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
     this.source?.close();
     this.source = null;
     this.connected.set(false);

@@ -15,14 +15,14 @@ import {
   SubscriptionDto,
   SubscriptionStatus,
   SubscriptionTier,
-  TIER_PRICES_CENTS,
-  periodTotalCents,
+  periodTotalCentsForCurrency,
+  tierPriceCentsForCurrency,
 } from '@org/shared';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
 import { SubscriptionsApiService } from '../../core/api/subscriptions-api.service';
 import { ConfirmModalComponent } from '../../ui/confirm-modal.component';
 import { ToastService } from '../../ui/toast.service';
 import { AnalyticsService } from '../../core/analytics.service';
-import { formatEuros } from '../../ui/format';
 
 const STATUS_LABELS: Record<SubscriptionStatus, string> = {
   TRIALING: 'Δοκιμαστική περίοδος',
@@ -55,7 +55,10 @@ const FEATURE_META: { flag: FeatureFlag; label: string }[] = [
       <div class="card text-sm text-slate-500">Φόρτωση…</div>
     } @else if (error() || !sub()) {
       <div class="card border-red-200 bg-red-50 text-sm text-red-700">
-        Αποτυχία φόρτωσης συνδρομής.
+        <p>Αποτυχία φόρτωσης συνδρομής.</p>
+        <button type="button" class="btn btn-secondary mt-3" (click)="reload()">
+          Δοκιμή ξανά
+        </button>
       </div>
     } @else if (sub(); as s) {
       <div class="mb-6 grid gap-4 lg:grid-cols-2">
@@ -112,14 +115,20 @@ const FEATURE_META: { flag: FeatureFlag; label: string }[] = [
             </div>
           </dl>
           <div class="mt-5 flex flex-wrap gap-2">
-            <button
-              type="button"
-              class="btn btn-primary"
-              (click)="activate()"
-              [disabled]="busy()"
-            >
-              Ενεργοποίηση περιόδου
-            </button>
+            @if (canActivate()) {
+              <button
+                type="button"
+                class="btn btn-primary"
+                (click)="activate()"
+                [disabled]="busy()"
+              >
+                {{ s.status === 'CANCELLED' ? 'Επανενεργοποίηση συνδρομής' : 'Ενεργοποίηση χρέωσης' }}
+              </button>
+            } @else if (s.status === 'TRIALING') {
+              <p class="self-center text-sm text-emerald-700">
+                Η δοκιμαστική περίοδος είναι ήδη ενεργή· δεν απαιτείται ενεργοποίηση.
+              </p>
+            }
             @if (s.status !== 'CANCELLED') {
               <button
                 type="button"
@@ -177,7 +186,7 @@ const FEATURE_META: { flag: FeatureFlag; label: string }[] = [
               }
             </div>
             <p class="mt-1 text-sm text-slate-600">
-              {{ euros(TIER_PRICES_CENTS[tier]) }} ανά διαμέρισμα / μήνα
+              {{ euros(tierPrice(tier)) }} ανά διαμέρισμα / μήνα
             </p>
             <dl class="mt-3 space-y-1 text-sm text-slate-700">
               <div class="flex justify-between">
@@ -248,12 +257,12 @@ const FEATURE_META: { flag: FeatureFlag; label: string }[] = [
 })
 export class AdminSubscriptionPage implements OnInit {
   private readonly subscriptionsApi = inject(SubscriptionsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly toast = inject(ToastService);
   private readonly analytics = inject(AnalyticsService);
 
   protected readonly tiers = SUBSCRIPTION_TIERS;
   protected readonly features = FEATURE_META;
-  protected readonly TIER_PRICES_CENTS = TIER_PRICES_CENTS;
 
   protected readonly sub = signal<SubscriptionDto | null>(null);
   protected readonly loading = signal(true);
@@ -265,6 +274,12 @@ export class AdminSubscriptionPage implements OnInit {
   protected readonly flags = computed(() => {
     const s = this.sub();
     return s ? FEATURES_BY_TIER[s.tier] : FEATURES_BY_TIER.BASIC;
+  });
+
+  /** Activation starts the paid period; it is not a free-trial action. */
+  protected readonly canActivate = computed(() => {
+    const s = this.sub();
+    return !!s && (s.status === 'PAST_DUE' || s.status === 'CANCELLED');
   });
 
   protected readonly trialDaysLeft = computed(() => {
@@ -304,6 +319,9 @@ export class AdminSubscriptionPage implements OnInit {
       )
       .subscribe((sub) => {
         this.sub.set(sub);
+        // Keep the selector in lock-step with the persisted subscription;
+        // otherwise the first tier click can silently change the cycle.
+        this.cycle.set(sub.billingCycle);
         this.loading.set(false);
       });
   }
@@ -329,7 +347,7 @@ export class AdminSubscriptionPage implements OnInit {
   }
 
   protected activate(): void {
-    if (this.busy()) return;
+    if (this.busy() || !this.canActivate()) return;
     this.busy.set(true);
     this.subscriptionsApi
       .activate()
@@ -367,12 +385,26 @@ export class AdminSubscriptionPage implements OnInit {
       });
   }
 
+  protected tierPrice(tier: SubscriptionTier): number {
+    return tierPriceCentsForCurrency(tier, this.money.currency());
+  }
+
   protected monthlyTotal(tier: SubscriptionTier): number {
-    return periodTotalCents(tier, 'MONTHLY', this.sub()?.units ?? 0);
+    return periodTotalCentsForCurrency(
+      tier,
+      'MONTHLY',
+      this.sub()?.units ?? 0,
+      this.money.currency(),
+    );
   }
 
   protected annualTotal(tier: SubscriptionTier): number {
-    return periodTotalCents(tier, 'ANNUAL', this.sub()?.units ?? 0);
+    return periodTotalCentsForCurrency(
+      tier,
+      'ANNUAL',
+      this.sub()?.units ?? 0,
+      this.money.currency(),
+    );
   }
 
   protected tierLabel(tier: SubscriptionTier): string {
@@ -398,5 +430,6 @@ export class AdminSubscriptionPage implements OnInit {
     return new Date(iso).toLocaleDateString('el-GR');
   }
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
 }

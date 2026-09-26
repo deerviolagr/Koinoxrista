@@ -11,7 +11,9 @@ import { BalanceScreen } from './src/screens/BalanceScreen';
 import { VotesScreen } from './src/screens/VotesScreen';
 import { ShopScreen } from './src/screens/ShopScreen';
 import { FeedScreen } from './src/screens/FeedScreen';
+import { RoleHomeScreen } from './src/screens/RoleHomeScreen';
 import { AuthContextProvider, useAuth } from './src/AuthContext';
+import { homeForRole } from './src/contracts';
 
 const Stack = createNativeStackNavigator();
 
@@ -23,7 +25,7 @@ const TABS = [
   { key: 'feed', label: 'Feed', icon: '≡' },
 ];
 
-function MainTabs() {
+function ResidentTabs() {
   const [active, setActive] = useState('overview');
   let Screen;
   switch (active) {
@@ -43,8 +45,10 @@ function MainTabs() {
       Screen = DashboardScreen;
   }
   return (
-    <View style={{ flex: 1 }}>
-      <View style={{ flex: 1 }}><Screen /></View>
+    <View style={styles.main}>
+      <View style={styles.screen}>
+        <Screen />
+      </View>
       <SafeAreaView edges={['bottom']} style={styles.tabBar}>
         {TABS.map((tab) => {
           const isActive = tab.key === active;
@@ -53,9 +57,15 @@ function MainTabs() {
               key={tab.key}
               onPress={() => setActive(tab.key)}
               style={[styles.tab, isActive && styles.tabActive]}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: isActive }}
             >
-              <Text style={[styles.tabIcon, isActive && styles.tabIconActive]}>{tab.icon}</Text>
-              <Text style={[styles.tabLabel, isActive && styles.tabLabelActive]}>{tab.label}</Text>
+              <Text style={[styles.tabIcon, isActive && styles.tabIconActive]}>
+                {tab.icon}
+              </Text>
+              <Text style={[styles.tabLabel, isActive && styles.tabLabelActive]}>
+                {tab.label}
+              </Text>
             </TouchableOpacity>
           );
         })}
@@ -64,7 +74,33 @@ function MainTabs() {
   );
 }
 
+function UnsupportedRole() {
+  const { user, signOut } = useAuth();
+  return (
+    <SafeAreaView style={styles.safe}>
+      <View style={styles.center}>
+        <Text style={styles.title}>PolykatoikiaOS</Text>
+        <Text style={styles.body}>
+          This role ({user?.role ?? 'unknown'}) is not available in the resident
+          mobile app.
+        </Text>
+        <TouchableOpacity style={styles.button} onPress={signOut}>
+          <Text style={styles.buttonText}>Log out</Text>
+        </TouchableOpacity>
+      </View>
+    </SafeAreaView>
+  );
+}
+
 const styles = StyleSheet.create({
+  main: { flex: 1 },
+  screen: { flex: 1 },
+  safe: { flex: 1, backgroundColor: '#f8fafc' },
+  center: { flex: 1, justifyContent: 'center', padding: 24 },
+  title: { fontSize: 26, fontWeight: '800', color: '#0f766e', textAlign: 'center' },
+  body: { color: '#475569', textAlign: 'center', lineHeight: 22, marginVertical: 16 },
+  button: { backgroundColor: '#0f766e', borderRadius: 10, paddingVertical: 14, alignItems: 'center' },
+  buttonText: { color: '#fff', fontWeight: '700' },
   tabBar: {
     flexDirection: 'row',
     borderTopWidth: 1,
@@ -73,7 +109,7 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   tab: { flex: 1, alignItems: 'center', paddingVertical: 4 },
-  tabActive: { },
+  tabActive: {},
   tabIcon: { fontSize: 16, color: '#64748b' },
   tabIconActive: { color: '#0f766e' },
   tabLabel: { fontSize: 10, color: '#64748b', marginTop: 2, fontWeight: '600' },
@@ -81,21 +117,27 @@ const styles = StyleSheet.create({
 });
 
 function Root() {
-  const { token, ready } = useAuth();
+  const { token, user, ready } = useAuth();
   if (!ready) {
     return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+      <View style={styles.center}>
         <ActivityIndicator color="#0f766e" />
       </View>
     );
   }
+
+  const roleRoute = homeForRole(user?.role);
   return (
     <NavigationContainer>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
-        {token ? (
-          <Stack.Screen name="Main" component={MainTabs} />
-        ) : (
+        {!token ? (
           <Stack.Screen name="Login" component={LoginScreen} />
+        ) : roleRoute === 'resident' ? (
+          <Stack.Screen name="ResidentTabs" component={ResidentTabs} />
+        ) : roleRoute === 'staff' ? (
+          <Stack.Screen name="RoleHome" component={RoleHomeScreen} />
+        ) : (
+          <Stack.Screen name="Unsupported" component={UnsupportedRole} />
         )}
       </Stack.Navigator>
     </NavigationContainer>

@@ -27,7 +27,8 @@ import {
 } from '../../core/api/payment-plans-api.service';
 import { ConfirmModalComponent } from '../../ui/confirm-modal.component';
 import { ToastService } from '../../ui/toast.service';
-import { eurosToCents, formatEuros } from '../../ui/format';
+import { AdminMoneyService } from '../../core/api/admin-money.service';
+import { eurosToCents } from '../../ui/format';
 
 const MS_PER_DAY = 86_400_000;
 
@@ -123,7 +124,7 @@ export function installmentStateCls(installment: InstallmentDto): string {
               }
             </div>
             <div>
-              <label class="label" for="totalEuros">Ποσό (€, προαιρετικό)</label>
+              <label class="label" for="totalEuros">Ποσό ({{ currency() }}, προαιρετικό)</label>
               <input
                 id="totalEuros"
                 type="number"
@@ -341,7 +342,7 @@ export function installmentStateCls(installment: InstallmentDto): string {
           @if (plan.status === 'ACTIVE') {
             <form [formGroup]="paymentForm" (ngSubmit)="recordPayment()" class="mt-4 flex items-end gap-2">
               <div class="flex-1">
-                <label class="label" for="paymentEuros">Καταχώρηση πληρωμής (€)</label>
+                <label class="label" for="paymentEuros">Καταχώρηση πληρωμής ({{ currency() }})</label>
                 <input
                   id="paymentEuros"
                   type="number"
@@ -396,12 +397,14 @@ export function installmentStateCls(installment: InstallmentDto): string {
 })
 export class AdminPaymentPlansPage implements OnInit {
   private readonly buildingsApi = inject(BuildingsApiService);
+  private readonly money = inject(AdminMoneyService);
   private readonly unitsApi = inject(UnitsApiService);
   private readonly paymentPlansApi = inject(PaymentPlansApiService);
   private readonly toast = inject(ToastService);
   private readonly fb = inject(FormBuilder);
 
-  protected readonly euros = formatEuros;
+  protected readonly euros = (cents: number): string => this.money.format(cents);
+  protected readonly currency = this.money.currency;
   protected readonly progress = planProgressPercent;
   protected readonly statusLabel = paymentPlanStatusLabel;
   protected readonly statusCls = paymentPlanStatusCls;

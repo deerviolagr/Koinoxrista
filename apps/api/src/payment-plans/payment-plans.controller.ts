@@ -72,7 +72,10 @@ export class PaymentPlansController {
   /** RESIDENT read-only view of their own unit's active plan. */
   @Get('balance/payment-plan')
   @Roles(Role.RESIDENT)
-  myActivePlan(@CurrentUser() user: AuthenticatedUser) {
-    return this.paymentPlansService.myActivePlan(user);
+  myActivePlan(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('unitId') unitId?: string,
+  ) {
+    return this.paymentPlansService.myActivePlan(user, unitId);
   }
 }

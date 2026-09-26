@@ -1,5 +1,9 @@
 import { Route } from '@angular/router';
-import { canActivateRole, canActivateAuthed, homeRedirectGuard } from './core/role.guard';
+import {
+  canActivateRole,
+  canActivateAuthed,
+  homeRedirectGuard,
+} from './core/role.guard';
 import { LayoutComponent } from './layout/layout.component';
 
 export const appRoutes: Route[] = [
@@ -18,6 +22,13 @@ export const appRoutes: Route[] = [
     path: 'register',
     loadComponent: () =>
       import('./pages/auth/register.component').then((m) => m.RegisterPage),
+  },
+  {
+    path: 'verify-email',
+    loadComponent: () =>
+      import('./pages/auth/verify-email.component').then(
+        (m) => m.VerifyEmailPage,
+      ),
   },
   {
     path: 'admin',
@@ -127,6 +138,13 @@ export const appRoutes: Route[] = [
         loadComponent: () =>
           import('./pages/admin/admin-analytics.component').then(
             (m) => m.AdminAnalyticsPage,
+          ),
+      },
+      {
+        path: 'scheduler',
+        loadComponent: () =>
+          import('./pages/admin/admin-scheduler.component').then(
+            (m) => m.AdminSchedulerPage,
           ),
       },
       {
@@ -286,22 +304,30 @@ export const appRoutes: Route[] = [
       {
         path: 'treasury',
         loadComponent: () =>
-          import('./pages/admin/admin-treasury.component').then((m) => m.AdminTreasuryPage),
+          import('./pages/admin/admin-treasury.component').then(
+            (m) => m.AdminTreasuryPage,
+          ),
       },
       {
         path: 'reserve',
         loadComponent: () =>
-          import('./pages/admin/admin-reserve.component').then((m) => m.AdminReservePage),
+          import('./pages/admin/admin-reserve.component').then(
+            (m) => m.AdminReservePage,
+          ),
       },
       {
         path: 'occupancy',
         loadComponent: () =>
-          import('./pages/admin/admin-occupancy.component').then((m) => m.AdminOccupancyPage),
+          import('./pages/admin/admin-occupancy.component').then(
+            (m) => m.AdminOccupancyPage,
+          ),
       },
       {
         path: 'settings',
         loadComponent: () =>
-          import('./pages/admin/admin-settings.component').then((m) => m.AdminSettingsPage),
+          import('./pages/admin/admin-settings.component').then(
+            (m) => m.AdminSettingsPage,
+          ),
       },
     ],
   },
@@ -322,6 +348,39 @@ export const appRoutes: Route[] = [
         loadComponent: () =>
           import('./pages/accountant/accountant-apologismos.component').then(
             (m) => m.AccountantApologismosPage,
+          ),
+      },
+    ],
+  },
+  {
+    path: 'platform',
+    component: LayoutComponent,
+    canActivate: [canActivateRole('PLATFORM_ADMIN')],
+    children: [
+      {
+        path: '',
+        pathMatch: 'full',
+        redirectTo: 'billing',
+      },
+      {
+        path: 'billing',
+        loadComponent: () =>
+          import('./pages/admin/admin-billing.component').then(
+            (m) => m.AdminBillingPage,
+          ),
+      },
+      {
+        path: 'partners',
+        loadComponent: () =>
+          import('./pages/admin/admin-partners.component').then(
+            (m) => m.AdminPartnersPage,
+          ),
+      },
+      {
+        path: 'referrals',
+        loadComponent: () =>
+          import('./pages/admin/admin-referrals.component').then(
+            (m) => m.AdminReferralsPage,
           ),
       },
     ],
@@ -348,7 +407,9 @@ export const appRoutes: Route[] = [
       {
         path: '',
         loadComponent: () =>
-          import('./pages/balance/balance.component').then((m) => m.BalancePage),
+          import('./pages/balance/balance.component').then(
+            (m) => m.BalancePage,
+          ),
       },
       {
         path: 'statement',
